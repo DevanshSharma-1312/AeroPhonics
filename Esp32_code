@@ -1,0 +1,6294 @@
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#include <Firebase_ESP_Client.h>
+
+// Firebase helper files
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <time.h>
+
+
+/***************************************************
+                    WIFI
+***************************************************/
+
+#define WIFI_SSID "D"
+#define WIFI_PASS "12345678900"
+
+
+/***************************************************
+                  FIREBASE
+***************************************************/
+
+// Get this from:
+// Firebase Console
+// Project Settings
+// General
+// Web API Key
+
+#define API_KEY "AIzaSyBGXLcMMVyDstfx3pdzwa-yv40lQxZ6MV4"
+
+
+// IMPORTANT:
+// This must belong to your AEROPONICS Firebase project.
+
+#define DATABASE_URL \
+"https://aerophonics-6d377-default-rtdb.firebaseio.com/"
+
+
+// Firebase Authentication user
+#define USER_EMAIL "devanshsharma1303@gmail.com"
+#define USER_PASSWORD "Radha@Devansh1317"
+
+
+/***************************************************
+                     SENSORS
+***************************************************/
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+#define PH_PIN 34
+
+
+/***************************************************
+              AEROPONICS OUTPUTS
+***************************************************/
+
+// Relay 1
+#define MISTING_PUMP_PIN 16
+
+// Relay 2
+#define WATER_PUMP_PIN 17
+
+// Relay 3
+#define NUTRIENT_PUMP_PIN 18
+
+// Relay 4
+#define FAN_PIN 19
+
+// Relay 5
+#define GROW_LIGHT_PIN 23
+
+
+/***************************************************
+                  RELAY ARRAY
+***************************************************/
+
+int relayPins[5] =
+{
+  MISTING_PUMP_PIN,
+  WATER_PUMP_PIN,
+  NUTRIENT_PUMP_PIN,
+  FAN_PIN,
+  GROW_LIGHT_PIN
+};
+
+
+/***************************************************
+                     OBJECTS
+***************************************************/
+
+DHT dht(DHTPIN, DHTTYPE);
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+WebServer server(80);
+
+
+/***************************************************
+                      OLED
+***************************************************/
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+
+/***************************************************
+                SENSOR VARIABLES
+***************************************************/
+
+float temperature = 0.0;
+float humidity = 0.0;
+float phValue = 0.0;
+
+
+/***************************************************
+                RELAY VARIABLES
+***************************************************/
+
+bool relayState[5] =
+{
+  false,
+  false,
+  false,
+  false,
+  false
+};
+
+
+/***************************************************
+                    AUTOMATION
+***************************************************/
+
+bool autoMist = false;
+
+
+/***************************************************
+                      TIMERS
+***************************************************/
+
+unsigned long lastSensor = 0;
+unsigned long lastFirebase = 0;
+unsigned long lastOLED = 0;
+
+const unsigned long SENSOR_INTERVAL = 2000;
+const unsigned long FIREBASE_INTERVAL = 5000;
+const unsigned long OLED_INTERVAL = 2000;
+
+
+/***************************************************
+                  pH CALIBRATION
+***************************************************/
+
+float phSlope = -5.70;
+float phIntercept = 21.34;
+
+
+/***************************************************
+                     READ pH
+***************************************************/
+
+float readPH()
+{
+  long sum = 0;
+
+  for (int i = 0; i < 20; i++)
+  {
+    sum += analogRead(PH_PIN);
+    delay(5);
+  }
+
+  float average = sum / 20.0;
+
+  float voltage =
+      average * (3.3 / 4095.0);
+
+  float ph =
+      phSlope * voltage + phIntercept;
+
+  if (ph < 0)
+    ph = 0;
+
+  if (ph > 14)
+    ph = 14;
+
+  return ph;
+}
+
+
+/***************************************************
+                  WIFI CONNECT
+***************************************************/
+
+void connectWiFi()
+{
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println("        WIFI CONNECTION");
+  Serial.println("=================================");
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASS
+  );
+
+  Serial.print("Connecting to: ");
+  Serial.println(WIFI_SSID);
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+
+    Serial.print(".");
+
+    attempts++;
+
+    if (attempts >= 60)
+    {
+      Serial.println();
+      Serial.println("WiFi connection failed.");
+      Serial.println("Restarting...");
+
+      ESP.restart();
+    }
+  }
+
+  Serial.println();
+  Serial.println("WiFi Connected!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.print("RSSI: ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+}
+
+
+/***************************************************
+                    READ SENSORS
+***************************************************/
+
+void readSensors()
+{
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+  if (!isnan(t))
+  {
+    temperature = t;
+  }
+  else
+  {
+    Serial.println("DHT11 temperature error");
+  }
+
+  if (!isnan(h))
+  {
+    humidity = h;
+  }
+  else
+  {
+    Serial.println("DHT11 humidity error");
+  }
+
+  phValue = readPH();
+
+  Serial.println();
+  Serial.println("--------------------------------");
+
+  Serial.print("Temperature : ");
+  Serial.print(temperature, 1);
+  Serial.println(" C");
+
+  Serial.print("Humidity    : ");
+  Serial.print(humidity, 1);
+  Serial.println(" %");
+
+  Serial.print("pH          : ");
+  Serial.println(phValue, 2);
+
+  Serial.println("--------------------------------");
+}
+
+
+/***************************************************
+                 SET RELAY OUTPUT
+***************************************************/
+
+void setRelay(int index, bool state)
+{
+  if (index < 0 || index >= 5)
+    return;
+
+  relayState[index] = state;
+
+  /*
+     Active LOW relay
+
+     LOW  = ON
+     HIGH = OFF
+  */
+
+  digitalWrite(
+    relayPins[index],
+    state ? LOW : HIGH
+  );
+}
+
+
+/***************************************************
+               FIREBASE SEND SENSOR
+***************************************************/
+
+void sendFirebase()
+{
+  Serial.println();
+  Serial.println("========== FIREBASE UPDATE ==========");
+
+  if (!Firebase.ready())
+  {
+    Serial.println("Firebase NOT READY");
+
+    Serial.print("WiFi status: ");
+    Serial.println(WiFi.status());
+
+    Serial.println("====================================");
+
+    return;
+  }
+
+
+  /***********************************************
+                  TEMPERATURE
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        "/sensor/temp",
+        temperature))
+  {
+    Serial.print("Temperature OK: ");
+    Serial.println(temperature);
+  }
+  else
+  {
+    Serial.print("Temperature FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  /***********************************************
+                    HUMIDITY
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        "/sensor/hum",
+        humidity))
+  {
+    Serial.print("Humidity OK: ");
+    Serial.println(humidity);
+  }
+  else
+  {
+    Serial.print("Humidity FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  /***********************************************
+                       pH
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        "/sensor/ph",
+        phValue))
+  {
+    Serial.print("pH OK: ");
+    Serial.println(phValue);
+  }
+  else
+  {
+    Serial.print("pH FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  /***********************************************
+                       HISTORY
+  ************************************************/
+
+  time_t now;
+
+  time(&now);
+
+  String timestamp;
+
+  if (now > 100000)
+  {
+    timestamp =
+        String((unsigned long)now);
+  }
+  else
+  {
+    timestamp =
+        String(millis());
+  }
+
+
+  String path =
+      "/history/" + timestamp;
+
+
+  /***********************************************
+                HISTORY TEMPERATURE
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        path + "/temp",
+        temperature))
+  {
+    Serial.println("History temperature OK");
+  }
+  else
+  {
+    Serial.print("History temperature FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  /***********************************************
+                  HISTORY HUMIDITY
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        path + "/hum",
+        humidity))
+  {
+    Serial.println("History humidity OK");
+  }
+  else
+  {
+    Serial.print("History humidity FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  /***********************************************
+                     HISTORY pH
+  ************************************************/
+
+  if (Firebase.RTDB.setFloat(
+        &fbdo,
+        path + "/ph",
+        phValue))
+  {
+    Serial.println("History pH OK");
+  }
+  else
+  {
+    Serial.print("History pH FAILED: ");
+    Serial.println(fbdo.errorReason());
+  }
+
+
+  Serial.println("====================================");
+}
+
+
+/***************************************************
+              FIREBASE READ RELAYS
+***************************************************/
+
+void readRelayFirebase()
+{
+  if (!Firebase.ready())
+    return;
+
+
+  /***********************************************
+                    RELAY 1
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/relay1"))
+  {
+    relayState[0] =
+        fbdo.boolData();
+
+    setRelay(
+      0,
+      relayState[0]
+    );
+  }
+
+
+  /***********************************************
+                    RELAY 2
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/relay2"))
+  {
+    relayState[1] =
+        fbdo.boolData();
+
+    setRelay(
+      1,
+      relayState[1]
+    );
+  }
+
+
+  /***********************************************
+                    RELAY 3
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/relay3"))
+  {
+    relayState[2] =
+        fbdo.boolData();
+
+    setRelay(
+      2,
+      relayState[2]
+    );
+  }
+
+
+  /***********************************************
+                    RELAY 4
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/relay4"))
+  {
+    relayState[3] =
+        fbdo.boolData();
+
+    setRelay(
+      3,
+      relayState[3]
+    );
+  }
+
+
+  /***********************************************
+                    RELAY 5
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/relay5"))
+  {
+    relayState[4] =
+        fbdo.boolData();
+
+    setRelay(
+      4,
+      relayState[4]
+    );
+  }
+
+
+  /***********************************************
+                    AUTO MIST
+  ************************************************/
+
+  if (Firebase.RTDB.getBool(
+        &fbdo,
+        "/control/autoMist"))
+  {
+    autoMist =
+        fbdo.boolData();
+  }
+
+
+  /***********************************************
+                AUTOMATIC MISTING
+  ************************************************/
+
+  if (autoMist)
+  {
+    if (humidity < 60.0)
+    {
+      setRelay(
+        0,
+        true
+      );
+    }
+    else
+    {
+      setRelay(
+        0,
+        false
+      );
+    }
+  }
+
+  Serial.println("Firebase control synchronized");
+}
+
+
+/***************************************************
+                    OLED DISPLAY
+***************************************************/
+
+void updateOLED()
+{
+  display.clearDisplay();
+
+  display.setTextColor(
+    SSD1306_WHITE
+  );
+
+
+  /***********************************************
+                     HEADER
+  ************************************************/
+
+  display.setTextSize(1);
+
+  display.setCursor(
+    25,
+    0
+  );
+
+  display.println(
+    "AEROPONICS"
+  );
+
+  display.drawLine(
+    0,
+    10,
+    127,
+    10,
+    SSD1306_WHITE
+  );
+
+
+  /***********************************************
+                  TEMPERATURE
+  ************************************************/
+
+  display.setCursor(
+    3,
+    16
+  );
+
+  display.print("TEMP:");
+
+  display.print(
+    temperature,
+    1
+  );
+
+  display.print("C");
+
+
+  /***********************************************
+                    HUMIDITY
+  ************************************************/
+
+  display.setCursor(
+    67,
+    16
+  );
+
+  display.print("H:");
+
+  display.print(
+    humidity,
+    0
+  );
+
+  display.print("%");
+
+
+  /***********************************************
+                       pH
+  ************************************************/
+
+  display.setCursor(
+    3,
+    31
+  );
+
+  display.print("pH:");
+
+  display.print(
+    phValue,
+    2
+  );
+
+
+  /***********************************************
+                    AUTOMATION
+  ************************************************/
+
+  display.setCursor(
+    67,
+    31
+  );
+
+  display.print("AUTO:");
+
+  if (autoMist)
+    display.print("ON");
+  else
+    display.print("OFF");
+
+
+  /***********************************************
+                     ACTUATORS
+  ************************************************/
+
+  display.setCursor(
+    3,
+    46
+  );
+
+  display.print("M:");
+
+  display.print(
+    relayState[0] ? "ON " : "OFF"
+  );
+
+  display.print(" W:");
+
+  display.print(
+    relayState[1] ? "ON" : "OFF"
+  );
+
+
+  /***********************************************
+                    WIFI STATUS
+  ************************************************/
+
+  display.setCursor(
+    3,
+    57
+  );
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    display.print("WiFi OK");
+  }
+  else
+  {
+    display.print("WiFi OFF");
+  }
+
+  display.display();
+}
+
+
+/***************************************************
+                 LOCAL DASHBOARD
+***************************************************/
+
+String html = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width,
+initial-scale=1">
+
+<title>Aeroponics Control</title>
+
+<style>
+
+body
+{
+  background:#0b0f19;
+  color:white;
+  font-family:Arial;
+  text-align:center;
+  margin:0;
+  padding:15px;
+}
+
+h2
+{
+  color:#00e5ff;
+}
+
+.card
+{
+  background:#141a2e;
+  margin:12px auto;
+  padding:18px;
+  border-radius:12px;
+  max-width:500px;
+
+  box-shadow:
+  0 0 15px #00e5ff44;
+}
+
+.value
+{
+  font-size:22px;
+  font-weight:bold;
+}
+
+button
+{
+  padding:12px 18px;
+  margin:6px;
+
+  border:none;
+  border-radius:8px;
+
+  background:#00e5ff;
+
+  color:black;
+
+  font-size:15px;
+
+  cursor:pointer;
+}
+
+button:hover
+{
+  background:#00bcd4;
+}
+
+.status
+{
+  margin:8px;
+  padding:10px;
+
+  border-radius:8px;
+
+  background:#202942;
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<h2>🌱 SMART AEROPONICS</h2>
+
+
+<div class="card">
+
+<h3>Sensor Monitoring</h3>
+
+
+<div class="status">
+
+Temperature:
+<span class="value"
+id="temp">
+--
+</span>
+°C
+
+</div>
+
+
+<div class="status">
+
+Humidity:
+<span class="value"
+id="hum">
+--
+</span>
+%
+
+</div>
+
+
+<div class="status">
+
+pH:
+<span class="value"
+id="ph">
+--
+</span>
+
+</div>
+
+</div>
+
+
+<div class="card">
+
+<h3>Actuator Control</h3>
+
+
+<button onclick="toggle(1)">
+🌫 Misting Pump
+</button>
+
+
+<button onclick="toggle(2)">
+💧 Water Pump
+</button>
+
+
+<button onclick="toggle(3)">
+🧪 Nutrient Pump
+</button>
+
+
+<button onclick="toggle(4)">
+🌀 Fan
+</button>
+
+
+<button onclick="toggle(5)">
+💡 Grow Light
+</button>
+
+
+</div>
+
+
+<div class="card">
+
+<h3>Automation</h3>
+
+
+<button onclick="toggleAuto()">
+
+🤖 Automatic Misting
+
+</button>
+
+
+<p>
+
+Automation:
+<span id="auto">
+OFF
+</span>
+
+</p>
+
+</div>
+
+
+<script>
+
+
+function fetchData()
+{
+
+  fetch("/data")
+
+  .then(res => res.json())
+
+  .then(data =>
+  {
+
+    document.getElementById(
+      "temp"
+    ).innerText =
+      Number(data.temp).toFixed(1);
+
+
+    document.getElementById(
+      "hum"
+    ).innerText =
+      Number(data.hum).toFixed(1);
+
+
+    document.getElementById(
+      "ph"
+    ).innerText =
+      Number(data.ph).toFixed(2);
+
+
+    document.getElementById(
+      "auto"
+    ).innerText =
+      data.autoMist ?
+      "ON" :
+      "OFF";
+
+  });
+
+}
+
+
+function toggle(r)
+{
+
+  fetch(
+    "/toggle?relay=" + r
+  )
+
+  .then(() =>
+  {
+    fetchData();
+  });
+
+}
+
+
+function toggleAuto()
+{
+
+  fetch("/autoMist")
+
+  .then(() =>
+  {
+    fetchData();
+  });
+
+}
+
+
+fetchData();
+
+
+setInterval(
+  fetchData,
+  2000
+);
+
+
+</script>
+
+
+</body>
+
+</html>
+
+)rawliteral";
+
+
+/***************************************************
+                    WEB ROOT
+***************************************************/
+
+void handleRoot()
+{
+  server.send(
+    200,
+    "text/html",
+    html
+  );
+}
+
+
+/***************************************************
+                    WEB DATA
+***************************************************/
+
+void handleData()
+{
+  String json = "{";
+
+  json +=
+      "\"temp\":" +
+      String(temperature, 2) +
+      ",";
+
+  json +=
+      "\"hum\":" +
+      String(humidity, 2) +
+      ",";
+
+  json +=
+      "\"ph\":" +
+      String(phValue, 2) +
+      ",";
+
+  json +=
+      "\"autoMist\":" +
+      String(
+        autoMist ? "true" : "false"
+      );
+
+  json += "}";
+
+
+  server.send(
+    200,
+    "application/json",
+    json
+  );
+}
+
+
+/***************************************************
+                 WEB RELAY CONTROL
+***************************************************/
+
+void handleToggle()
+{
+  if (!server.hasArg("relay"))
+  {
+    server.send(
+      400,
+      "text/plain",
+      "Missing relay"
+    );
+
+    return;
+  }
+
+
+  int relay =
+      server.arg("relay").toInt() - 1;
+
+
+  if (relay < 0 || relay >= 5)
+  {
+    server.send(
+      400,
+      "text/plain",
+      "Invalid relay"
+    );
+
+    return;
+  }
+
+
+  relayState[relay] =
+      !relayState[relay];
+
+
+  setRelay(
+    relay,
+    relayState[relay]
+  );
+
+
+  if (Firebase.ready())
+  {
+    String path =
+        "/control/relay" +
+        String(relay + 1);
+
+    if (Firebase.RTDB.setBool(
+          &fbdo,
+          path,
+          relayState[relay]))
+    {
+      Serial.print("Relay Firebase OK: ");
+      Serial.println(path);
+    }
+    else
+    {
+      Serial.print("Relay Firebase ERROR: ");
+      Serial.println(fbdo.errorReason());
+    }
+  }
+
+
+  server.send(
+    200,
+    "text/plain",
+    "OK"
+  );
+}
+
+
+/***************************************************
+              WEB AUTO MIST CONTROL
+***************************************************/
+
+void handleAutoMist()
+{
+  autoMist =
+      !autoMist;
+
+
+  if (Firebase.ready())
+  {
+    if (Firebase.RTDB.setBool(
+          &fbdo,
+          "/control/autoMist",
+          autoMist))
+    {
+      Serial.println(
+        "Auto Mist Firebase OK"
+      );
+    }
+    else
+    {
+      Serial.print(
+        "Auto Mist Firebase ERROR: "
+      );
+
+      Serial.println(
+        fbdo.errorReason()
+      );
+    }
+  }
+
+
+  server.send(
+    200,
+    "text/plain",
+    "OK"
+  );
+}
+
+
+/***************************************************
+                       SETUP
+***************************************************/
+
+void setup()
+{
+  Serial.begin(9600);
+
+  delay(1000);
+
+
+  Serial.println();
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " SMART AEROPONICS i-BOT ESP32"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  /***********************************************
+                  ADC CONFIGURATION
+  ************************************************/
+
+  analogReadResolution(12);
+
+  analogSetAttenuation(
+    ADC_11db
+  );
+
+
+  /***********************************************
+                    RELAY SETUP
+  ************************************************/
+
+  for (int i = 0; i < 5; i++)
+  {
+    pinMode(
+      relayPins[i],
+      OUTPUT
+    );
+
+    digitalWrite(
+      relayPins[i],
+      HIGH
+    );
+
+    relayState[i] =
+        false;
+  }
+
+
+  /***********************************************
+                      I2C / OLED
+  ************************************************/
+
+  Wire.begin(
+    21,
+    22
+  );
+
+
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        0x3C
+      ))
+  {
+    Serial.println(
+      "OLED initialization failed!"
+    );
+  }
+  else
+  {
+    display.clearDisplay();
+
+    display.setTextColor(
+      SSD1306_WHITE
+    );
+
+    display.setTextSize(1);
+
+    display.setCursor(
+      18,
+      15
+    );
+
+    display.println(
+      "SMART AEROPONICS"
+    );
+
+    display.setCursor(
+      28,
+      35
+    );
+
+    display.println(
+      "Starting..."
+    );
+
+    display.display();
+
+    delay(1500);
+  }
+
+
+  /***********************************************
+                       DHT
+  ************************************************/
+
+  dht.begin();
+
+
+  /***********************************************
+                       WIFI
+  ************************************************/
+
+  connectWiFi();
+
+
+  /***********************************************
+                    FIREBASE
+  ************************************************/
+
+  config.api_key =
+      API_KEY;
+
+  config.database_url =
+      DATABASE_URL;
+
+
+  /*
+     Firebase Email/Password
+     Authentication
+  */
+
+  auth.user.email =
+      USER_EMAIL;
+
+  auth.user.password =
+      USER_PASSWORD;
+
+
+  /*
+     Token status callback
+  */
+
+  config.token_status_callback =
+      tokenStatusCallback;
+
+
+  /*
+     Server response timeout
+  */
+
+  config.timeout.serverResponse =
+      10000;
+
+
+  /*
+     Start Firebase
+  */
+
+  Firebase.begin(
+    &config,
+    &auth
+  );
+
+  Firebase.reconnectWiFi(
+    true
+  );
+
+
+  /***********************************************
+                    FIREBASE STATUS
+  ************************************************/
+
+  Serial.println();
+  Serial.println(
+    "========== FIREBASE =========="
+  );
+
+  Serial.print(
+    "Database URL: "
+  );
+
+  Serial.println(
+    DATABASE_URL
+  );
+
+  Serial.print(
+    "Firebase Ready: "
+  );
+
+  Serial.println(
+    Firebase.ready()
+  );
+
+  Serial.println(
+    "=============================="
+  );
+
+
+  /***********************************************
+                       TIME
+  ************************************************/
+
+  configTime(
+    0,
+    0,
+    "pool.ntp.org",
+    "time.nist.gov"
+  );
+
+
+  /***********************************************
+                   WEB SERVER
+  ************************************************/
+
+  server.on(
+    "/",
+    handleRoot
+  );
+
+  server.on(
+    "/data",
+    handleData
+  );
+
+  server.on(
+    "/toggle",
+    handleToggle
+  );
+
+  server.on(
+    "/autoMist",
+    handleAutoMist
+  );
+
+
+  server.begin();
+
+
+  Serial.println();
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    "SYSTEM READY"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.print(
+    "Dashboard: http://"
+  );
+
+  Serial.println(
+    WiFi.localIP()
+  );
+}
+
+
+/***************************************************
+                      LOOP
+***************************************************/
+
+void loop()
+{
+  /***********************************************
+                  WEB SERVER
+  ************************************************/
+
+  server.handleClient();
+
+
+  /***********************************************
+                   WIFI CHECK
+  ************************************************/
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println(
+      "WiFi disconnected."
+    );
+
+    WiFi.reconnect();
+  }
+
+
+  /***********************************************
+                  SENSOR UPDATE
+  ************************************************/
+
+  if (
+    millis() - lastSensor
+    >= SENSOR_INTERVAL
+  )
+  {
+    lastSensor =
+        millis();
+
+    readSensors();
+  }
+
+
+  /***********************************************
+                 FIREBASE UPDATE
+  ************************************************/
+
+  if (
+    Firebase.ready() &&
+    millis() - lastFirebase
+    >= FIREBASE_INTERVAL
+  )
+  {
+    lastFirebase =
+        millis();
+
+    sendFirebase();
+
+    readRelayFirebase();
+  }
+
+
+  /***********************************************
+                    OLED UPDATE
+  ************************************************/
+
+  if (
+    millis() - lastOLED
+    >= OLED_INTERVAL
+  )
+  {
+    lastOLED =
+        millis();
+
+    updateOLED();
+  }
+}
+
+
+
+// /***************************************************
+//    SMART AEROPONICS - ESP32 / i-BOT
+
+//    FEATURES
+//    -------------------------------------------------
+//    Sensors:
+//    - DHT11 Temperature
+//    - DHT11 Humidity
+//    - pH Sensor
+
+//    Outputs:
+//    - Misting Pump
+//    - Water Pump
+//    - Nutrient Pump
+//    - Fan
+//    - Grow Light
+
+//    Communication:
+//    - WiFi
+//    - Firebase Realtime Database
+//    - Local Web Server
+
+//    Display:
+//    - 0.96" OLED SSD1306 I2C
+
+//    Firebase:
+//    /sensor/temp
+//    /sensor/hum
+//    /sensor/ph
+
+//    /control/relay1
+//    /control/relay2
+//    /control/relay3
+//    /control/relay4
+//    /control/relay5
+
+//    /control/autoMist
+
+//    /history/<timestamp>/temp
+//    /history/<timestamp>/hum
+//    /history/<timestamp>/ph
+// ****************************************************/
+
+// // #include <Arduino.h>
+// // #include <WiFi.h>
+// // #include <WebServer.h>
+// // #include <Firebase_ESP_Client.h>
+// // #include <DHT.h>
+// // #include <Wire.h>
+// // #include <Adafruit_GFX.h>
+// // #include <Adafruit_SSD1306.h>
+// // #include <time.h>
+
+
+// // /***************************************************
+// //                     WIFI
+// // ***************************************************/
+
+// // #define WIFI_SSID "BLOOD"
+// // #define WIFI_PASS "1234567890"
+
+
+// // /***************************************************
+// //                   FIREBASE
+// // ***************************************************/
+
+// // #define API_KEY "n83gsAWK1Kyc0B7TTUWsHmfr9qHI507owcjwCTzN"
+
+// // #define DATABASE_URL "https://aerophonics-6d377-default-rtdb.firebaseio.com/"
+
+
+// // /***************************************************
+// //                     SENSORS
+// // ***************************************************/
+
+// // #define DHTPIN 4
+// // #define DHTTYPE DHT11
+
+// // #define PH_PIN 34
+
+
+// // /***************************************************
+// //               AEROPONICS OUTPUTS
+
+// //               YOUR REQUIRED PIN LAYOUT
+// // ***************************************************/
+
+// // // Relay 1
+// // #define MISTING_PUMP_PIN 16
+
+// // // Relay 2
+// // #define WATER_PUMP_PIN 17
+
+// // // Relay 3
+// // #define NUTRIENT_PUMP_PIN 18
+
+// // // Relay 4
+// // #define FAN_PIN 19
+
+// // // Relay 5
+// // #define GROW_LIGHT_PIN 23
+
+
+// // /***************************************************
+// //               RELAY ARRAY
+
+// //               DO NOT CHANGE ORDER
+// // ***************************************************/
+
+// // int relayPins[5] =
+// // {
+// //   MISTING_PUMP_PIN,
+// //   WATER_PUMP_PIN,
+// //   NUTRIENT_PUMP_PIN,
+// //   FAN_PIN,
+// //   GROW_LIGHT_PIN
+// // };
+
+
+// // /***************************************************
+// //                     OBJECTS
+// // ***************************************************/
+
+// // DHT dht(DHTPIN, DHTTYPE);
+
+// // FirebaseData fbdo;
+// // FirebaseAuth auth;
+// // FirebaseConfig config;
+
+// // WebServer server(80);
+
+
+// // /***************************************************
+// //                      OLED
+// // ***************************************************/
+
+// // #define SCREEN_WIDTH 128
+// // #define SCREEN_HEIGHT 64
+
+// // Adafruit_SSD1306 display(
+// //   SCREEN_WIDTH,
+// //   SCREEN_HEIGHT,
+// //   &Wire,
+// //   -1
+// // );
+
+
+// // /***************************************************
+// //                 SENSOR VARIABLES
+// // ***************************************************/
+
+// // float temperature = 0.0;
+// // float humidity = 0.0;
+// // float phValue = 0.0;
+
+
+// // /***************************************************
+// //                 RELAY VARIABLES
+// // ***************************************************/
+
+// // bool relayState[5] =
+// // {
+// //   false,
+// //   false,
+// //   false,
+// //   false,
+// //   false
+// // };
+
+
+// // /***************************************************
+// //                   AUTOMATION
+// // ***************************************************/
+
+// // bool autoMist = false;
+
+
+// // /***************************************************
+// //                     TIMERS
+// // ***************************************************/
+
+// // unsigned long lastSensor = 0;
+// // unsigned long lastFirebase = 0;
+// // unsigned long lastOLED = 0;
+
+// // const unsigned long SENSOR_INTERVAL = 2000;
+// // const unsigned long FIREBASE_INTERVAL = 3000;
+// // const unsigned long OLED_INTERVAL = 2000;
+
+
+// // /***************************************************
+// //                  pH CALIBRATION
+
+// //         CHANGE THESE AFTER CALIBRATION
+// // ***************************************************/
+
+// // float phSlope = -5.70;
+// // float phIntercept = 21.34;
+
+
+// // /***************************************************
+// //                     READ pH
+// // ***************************************************/
+
+// // float readPH()
+// // {
+// //   long sum = 0;
+
+// //   for (int i = 0; i < 20; i++)
+// //   {
+// //     sum += analogRead(PH_PIN);
+// //     delay(5);
+// //   }
+
+// //   float average = sum / 20.0;
+
+// //   float voltage =
+// //       average * (3.3 / 4095.0);
+
+// //   float ph =
+// //       phSlope * voltage + phIntercept;
+
+// //   if (ph < 0)
+// //     ph = 0;
+
+// //   if (ph > 14)
+// //     ph = 14;
+
+// //   return ph;
+// // }
+
+
+// // /***************************************************
+// //                   WIFI CONNECT
+// // ***************************************************/
+
+// // void connectWiFi()
+// // {
+// //   Serial.println();
+// //   Serial.println("=================================");
+// //   Serial.println("        WIFI CONNECTION");
+// //   Serial.println("=================================");
+
+// //   WiFi.mode(WIFI_STA);
+
+// //   WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+// //   Serial.print("Connecting to: ");
+// //   Serial.println(WIFI_SSID);
+
+// //   int attempts = 0;
+
+// //   while (WiFi.status() != WL_CONNECTED)
+// //   {
+// //     delay(500);
+
+// //     Serial.print(".");
+
+// //     attempts++;
+
+// //     if (attempts >= 60)
+// //     {
+// //       Serial.println();
+// //       Serial.println("WiFi connection failed.");
+// //       Serial.println("Restarting...");
+
+// //       ESP.restart();
+// //     }
+// //   }
+
+// //   Serial.println();
+// //   Serial.println("WiFi Connected!");
+
+// //   Serial.print("IP Address: ");
+// //   Serial.println(WiFi.localIP());
+
+// //   Serial.print("RSSI: ");
+// //   Serial.print(WiFi.RSSI());
+// //   Serial.println(" dBm");
+// // }
+
+
+// // /***************************************************
+// //                   READ SENSORS
+// // ***************************************************/
+
+// // void readSensors()
+// // {
+// //   float t = dht.readTemperature();
+// //   float h = dht.readHumidity();
+
+// //   if (!isnan(t))
+// //   {
+// //     temperature = t;
+// //   }
+// //   else
+// //   {
+// //     Serial.println("DHT11 temperature error");
+// //   }
+
+// //   if (!isnan(h))
+// //   {
+// //     humidity = h;
+// //   }
+// //   else
+// //   {
+// //     Serial.println("DHT11 humidity error");
+// //   }
+
+// //   phValue = readPH();
+
+// //   Serial.println();
+// //   Serial.println("--------------------------------");
+
+// //   Serial.print("Temperature : ");
+// //   Serial.print(temperature, 1);
+// //   Serial.println(" C");
+
+// //   Serial.print("Humidity    : ");
+// //   Serial.print(humidity, 1);
+// //   Serial.println(" %");
+
+// //   Serial.print("pH          : ");
+// //   Serial.println(phValue, 2);
+
+// //   Serial.println("--------------------------------");
+// // }
+
+
+// // /***************************************************
+// //               SET RELAY OUTPUT
+// // ***************************************************/
+
+// // void setRelay(int index, bool state)
+// // {
+// //   if (index < 0 || index >= 5)
+// //     return;
+
+// //   relayState[index] = state;
+
+// //   /*
+// //      Current relay logic:
+     
+// //      LOW  = ON
+// //      HIGH = OFF
+
+// //      This matches your original working code.
+// //   */
+
+// //   digitalWrite(
+// //     relayPins[index],
+// //     state ? LOW : HIGH
+// //   );
+// // }
+
+
+// // /***************************************************
+// //              FIREBASE SEND SENSOR
+// // ***************************************************/
+
+// // void sendFirebase()
+// // {
+// //   if (!Firebase.ready())
+// //     return;
+
+
+// //   /*************************************************
+// //                   LIVE SENSOR DATA
+// //   *************************************************/
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     "/sensor/temp",
+// //     temperature
+// //   );
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     "/sensor/hum",
+// //     humidity
+// //   );
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     "/sensor/ph",
+// //     phValue
+// //   );
+
+
+// //   /*************************************************
+// //                       HISTORY
+// //   *************************************************/
+
+// //   time_t now;
+
+// //   time(&now);
+
+// //   /*
+// //      If NTP has not synchronized yet,
+// //      use millis as fallback.
+// //   */
+
+// //   String timestamp;
+
+// //   if (now > 100000)
+// //   {
+// //     timestamp = String((unsigned long)now);
+// //   }
+// //   else
+// //   {
+// //     timestamp = String(millis());
+// //   }
+
+// //   String path =
+// //       "/history/" + timestamp;
+
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     path + "/temp",
+// //     temperature
+// //   );
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     path + "/hum",
+// //     humidity
+// //   );
+
+// //   Firebase.RTDB.setFloat(
+// //     &fbdo,
+// //     path + "/ph",
+// //     phValue
+// //   );
+
+
+// //   Serial.println("Firebase sensor data updated");
+// // }
+
+
+// // /***************************************************
+// //               FIREBASE READ RELAYS
+// // ***************************************************/
+
+// // void readRelayFirebase()
+// // {
+// //   if (!Firebase.ready())
+// //     return;
+
+
+// //   /*************************************************
+// //                  RELAY 1
+// //                  MISTING PUMP
+// //   *************************************************/
+
+// //   String path1 =
+// //       "/control/relay1";
+
+// //   if (Firebase.RTDB.getBool(&fbdo, path1))
+// //   {
+// //     relayState[0] =
+// //         fbdo.boolData();
+
+// //     setRelay(
+// //       0,
+// //       relayState[0]
+// //     );
+// //   }
+
+
+// //   /*************************************************
+// //                  RELAY 2
+// //                  WATER PUMP
+// //   *************************************************/
+
+// //   String path2 =
+// //       "/control/relay2";
+
+// //   if (Firebase.RTDB.getBool(&fbdo, path2))
+// //   {
+// //     relayState[1] =
+// //         fbdo.boolData();
+
+// //     setRelay(
+// //       1,
+// //       relayState[1]
+// //     );
+// //   }
+
+
+// //   /*************************************************
+// //                  RELAY 3
+// //                  NUTRIENT PUMP
+// //   *************************************************/
+
+// //   String path3 =
+// //       "/control/relay3";
+
+// //   if (Firebase.RTDB.getBool(&fbdo, path3))
+// //   {
+// //     relayState[2] =
+// //         fbdo.boolData();
+
+// //     setRelay(
+// //       2,
+// //       relayState[2]
+// //     );
+// //   }
+
+
+// //   /*************************************************
+// //                  RELAY 4
+// //                  FAN
+// //   *************************************************/
+
+// //   String path4 =
+// //       "/control/relay4";
+
+// //   if (Firebase.RTDB.getBool(&fbdo, path4))
+// //   {
+// //     relayState[3] =
+// //         fbdo.boolData();
+
+// //     setRelay(
+// //       3,
+// //       relayState[3]
+// //     );
+// //   }
+
+
+// //   /*************************************************
+// //                  RELAY 5
+// //                  GROW LIGHT
+// //   *************************************************/
+
+// //   String path5 =
+// //       "/control/relay5";
+
+// //   if (Firebase.RTDB.getBool(&fbdo, path5))
+// //   {
+// //     relayState[4] =
+// //         fbdo.boolData();
+
+// //     setRelay(
+// //       4,
+// //       relayState[4]
+// //     );
+// //   }
+
+
+// //   /*************************************************
+// //                     AUTO MIST
+// //   *************************************************/
+
+// //   String autoPath =
+// //       "/control/autoMist";
+
+// //   if (Firebase.RTDB.getBool(
+// //         &fbdo,
+// //         autoPath
+// //       ))
+// //   {
+// //     autoMist =
+// //         fbdo.boolData();
+// //   }
+
+
+// //   /*************************************************
+// //                AUTOMATIC MISTING
+// //   *************************************************/
+
+// //   if (autoMist)
+// //   {
+// //     /*
+// //        Current rule:
+
+// //        Humidity < 60%
+// //        → Misting ON
+
+// //        Humidity >= 60%
+// //        → Misting OFF
+// //     */
+
+// //     if (humidity < 60.0)
+// //     {
+// //       setRelay(
+// //         0,
+// //         true
+// //       );
+// //     }
+// //     else
+// //     {
+// //       setRelay(
+// //         0,
+// //         false
+// //       );
+// //     }
+// //   }
+
+
+// //   Serial.println("Firebase control synchronized");
+// // }
+
+
+// // /***************************************************
+// //                  OLED DISPLAY
+// // ***************************************************/
+
+// // void updateOLED()
+// // {
+// //   display.clearDisplay();
+
+// //   display.setTextColor(SSD1306_WHITE);
+
+// //   /*************************************************
+// //                       HEADER
+// //   *************************************************/
+
+// //   display.setTextSize(1);
+
+// //   display.setCursor(25, 0);
+
+// //   display.println("AEROPONICS");
+
+// //   display.drawLine(
+// //     0,
+// //     10,
+// //     127,
+// //     10,
+// //     SSD1306_WHITE
+// //   );
+
+
+// //   /*************************************************
+// //                   TEMPERATURE
+// //   *************************************************/
+
+// //   display.setCursor(3, 16);
+
+// //   display.print("TEMP:");
+
+// //   display.print(
+// //     temperature,
+// //     1
+// //   );
+
+// //   display.print("C");
+
+
+// //   /*************************************************
+// //                     HUMIDITY
+// //   *************************************************/
+
+// //   display.setCursor(67, 16);
+
+// //   display.print("H:");
+
+// //   display.print(
+// //     humidity,
+// //     0
+// //   );
+
+// //   display.print("%");
+
+
+// //   /*************************************************
+// //                        pH
+// //   *************************************************/
+
+// //   display.setCursor(3, 31);
+
+// //   display.print("pH:");
+
+// //   display.print(
+// //     phValue,
+// //     2
+// //   );
+
+
+// //   /*************************************************
+// //                    AUTOMATION
+// //   *************************************************/
+
+// //   display.setCursor(67, 31);
+
+// //   display.print("AUTO:");
+
+// //   if (autoMist)
+// //     display.print("ON");
+// //   else
+// //     display.print("OFF");
+
+
+// //   /*************************************************
+// //                     ACTUATORS
+// //   *************************************************/
+
+// //   display.setCursor(3, 46);
+
+// //   display.print("M:");
+
+// //   display.print(
+// //     relayState[0] ? "ON " : "OFF"
+// //   );
+
+// //   display.print(" W:");
+
+// //   display.print(
+// //     relayState[1] ? "ON" : "OFF"
+// //   );
+
+
+// //   /*************************************************
+// //                     WIFI STATUS
+// //   *************************************************/
+
+// //   display.setCursor(3, 57);
+
+// //   if (WiFi.status() == WL_CONNECTED)
+// //   {
+// //     display.print("WiFi OK");
+// //   }
+// //   else
+// //   {
+// //     display.print("WiFi OFF");
+// //   }
+
+// //   display.display();
+// // }
+
+
+// // /***************************************************
+// //                 LOCAL DASHBOARD
+// // ***************************************************/
+
+// // String html = R"rawliteral(
+
+// // <!DOCTYPE html>
+
+// // <html>
+
+// // <head>
+
+// // <meta name="viewport"
+// // content="width=device-width,
+// // initial-scale=1">
+
+// // <title>Aeroponics Control</title>
+
+// // <style>
+
+// // body
+// // {
+// // background:#0b0f19;
+// // color:white;
+// // font-family:Arial;
+// // text-align:center;
+// // margin:0;
+// // padding:15px;
+// // }
+
+// // h2
+// // {
+// // color:#00e5ff;
+// // }
+
+// // .card
+// // {
+// // background:#141a2e;
+// // margin:12px auto;
+// // padding:18px;
+// // border-radius:12px;
+// // max-width:500px;
+
+// // box-shadow:
+// // 0 0 15px #00e5ff44;
+// // }
+
+// // .value
+// // {
+// // font-size:22px;
+// // font-weight:bold;
+// // }
+
+// // button
+// // {
+// // padding:12px 18px;
+// // margin:6px;
+
+// // border:none;
+// // border-radius:8px;
+
+// // background:#00e5ff;
+
+// // color:black;
+
+// // font-size:15px;
+
+// // cursor:pointer;
+// // }
+
+// // button:hover
+// // {
+// // background:#00bcd4;
+// // }
+
+// // .status
+// // {
+// // margin:8px;
+// // padding:10px;
+
+// // border-radius:8px;
+
+// // background:#202942;
+// // }
+
+// // </style>
+
+// // </head>
+
+
+// // <body>
+
+
+// // <h2>🌱 SMART AEROPONICS</h2>
+
+
+// // <div class="card">
+
+// // <h3>Sensor Monitoring</h3>
+
+// // <div class="status">
+
+// // Temperature:
+// // <span class="value"
+// // id="temp">
+// // --
+// // </span>
+// // °C
+
+// // </div>
+
+
+// // <div class="status">
+
+// // Humidity:
+// // <span class="value"
+// // id="hum">
+// // --
+// // </span>
+// // %
+
+// // </div>
+
+
+// // <div class="status">
+
+// // pH:
+// // <span class="value"
+// // id="ph">
+// // --
+// // </span>
+
+// // </div>
+
+// // </div>
+
+
+// // <div class="card">
+
+// // <h3>Actuator Control</h3>
+
+
+// // <button onclick="toggle(1)">
+// // 🌫 Misting Pump
+// // </button>
+
+
+// // <button onclick="toggle(2)">
+// // 💧 Water Pump
+// // </button>
+
+
+// // <button onclick="toggle(3)">
+// // 🧪 Nutrient Pump
+// // </button>
+
+
+// // <button onclick="toggle(4)">
+// // 🌀 Fan
+// // </button>
+
+
+// // <button onclick="toggle(5)">
+// // 💡 Grow Light
+// // </button>
+
+
+// // </div>
+
+
+// // <div class="card">
+
+// // <h3>Automation</h3>
+
+
+// // <button onclick="toggleAuto()">
+
+// // 🤖 Automatic Misting
+
+// // </button>
+
+
+// // <p>
+
+// // Automation:
+// // <span id="auto">
+// // OFF
+// // </span>
+
+// // </p>
+
+// // </div>
+
+
+// // <script>
+
+
+// // function fetchData()
+// // {
+
+// // fetch("/data")
+
+// // .then(res => res.json())
+
+// // .then(data =>
+// // {
+
+// // document.getElementById(
+// // "temp"
+// // ).innerText =
+// // Number(data.temp).toFixed(1);
+
+
+// // document.getElementById(
+// // "hum"
+// // ).innerText =
+// // Number(data.hum).toFixed(1);
+
+
+// // document.getElementById(
+// // "ph"
+// // ).innerText =
+// // Number(data.ph).toFixed(2);
+
+
+// // document.getElementById(
+// // "auto"
+// // ).innerText =
+// // data.autoMist ?
+// // "ON" :
+// // "OFF";
+
+// // });
+
+// // }
+
+
+// // function toggle(r)
+// // {
+
+// // fetch(
+// // "/toggle?relay=" + r
+// // )
+
+// // .then(() =>
+// // {
+
+// // fetchData();
+
+// // });
+
+// // }
+
+
+// // function toggleAuto()
+// // {
+
+// // fetch("/autoMist")
+
+// // .then(() =>
+// // {
+
+// // fetchData();
+
+// // });
+
+// // }
+
+
+// // fetchData();
+
+
+// // setInterval(
+// // fetchData,
+// // 2000
+// // );
+
+
+// // </script>
+
+
+// // </body>
+
+// // </html>
+
+// // )rawliteral";
+
+
+// // /***************************************************
+// //                   WEB ROOT
+// // ***************************************************/
+
+// // void handleRoot()
+// // {
+// //   server.send(
+// //     200,
+// //     "text/html",
+// //     html
+// //   );
+// // }
+
+
+// // /***************************************************
+// //                   WEB DATA
+// // ***************************************************/
+
+// // void handleData()
+// // {
+// //   String json = "{";
+
+// //   json +=
+// //       "\"temp\":" +
+// //       String(temperature, 2) +
+// //       ",";
+
+// //   json +=
+// //       "\"hum\":" +
+// //       String(humidity, 2) +
+// //       ",";
+
+// //   json +=
+// //       "\"ph\":" +
+// //       String(phValue, 2) +
+// //       ",";
+
+// //   json +=
+// //       "\"autoMist\":" +
+// //       String(
+// //         autoMist ? "true" : "false"
+// //       );
+
+// //   json += "}";
+
+
+// //   server.send(
+// //     200,
+// //     "application/json",
+// //     json
+// //   );
+// // }
+
+
+// // /***************************************************
+// //                 WEB RELAY CONTROL
+// // ***************************************************/
+
+// // void handleToggle()
+// // {
+// //   if (!server.hasArg("relay"))
+// //   {
+// //     server.send(
+// //       400,
+// //       "text/plain",
+// //       "Missing relay"
+// //     );
+
+// //     return;
+// //   }
+
+
+// //   int relay =
+// //       server.arg("relay").toInt() - 1;
+
+
+// //   if (relay < 0 || relay >= 5)
+// //   {
+// //     server.send(
+// //       400,
+// //       "text/plain",
+// //       "Invalid relay"
+// //     );
+
+// //     return;
+// //   }
+
+
+// //   /*
+// //      Toggle current state
+// //   */
+
+// //   relayState[relay] =
+// //       !relayState[relay];
+
+
+// //   setRelay(
+// //     relay,
+// //     relayState[relay]
+// //   );
+
+
+// //   /*
+// //      Save to Firebase
+// //   */
+
+// //   if (Firebase.ready())
+// //   {
+// //     String path =
+// //         "/control/relay" +
+// //         String(relay + 1);
+
+// //     Firebase.RTDB.setBool(
+// //       &fbdo,
+// //       path,
+// //       relayState[relay]
+// //     );
+// //   }
+
+
+// //   server.send(
+// //     200,
+// //     "text/plain",
+// //     "OK"
+// //   );
+// // }
+
+
+// // /***************************************************
+// //               WEB AUTO MIST CONTROL
+// // ***************************************************/
+
+// // void handleAutoMist()
+// // {
+// //   autoMist =
+// //       !autoMist;
+
+
+// //   if (Firebase.ready())
+// //   {
+// //     Firebase.RTDB.setBool(
+// //       &fbdo,
+// //       "/control/autoMist",
+// //       autoMist
+// //     );
+// //   }
+
+
+// //   server.send(
+// //     200,
+// //     "text/plain",
+// //     "OK"
+// //   );
+// // }
+
+
+// // /***************************************************
+// //                      SETUP
+// // ***************************************************/
+
+// // void setup()
+// // {
+
+// //   Serial.begin(9600);
+
+// //   delay(1000);
+
+
+// //   Serial.println();
+// //   Serial.println(
+// //     "================================="
+// //   );
+
+// //   Serial.println(
+// //     " SMART AEROPONICS i-BOT ESP32"
+// //   );
+
+// //   Serial.println(
+// //     "================================="
+// //   );
+
+
+// //   /*************************************************
+// //                   ADC CONFIGURATION
+// //   *************************************************/
+
+// //   analogReadResolution(12);
+
+// //   analogSetAttenuation(
+// //     ADC_11db
+// //   );
+
+
+// //   /*************************************************
+// //                    RELAY SETUP
+// //   *************************************************/
+
+// //   for (int i = 0; i < 5; i++)
+// //   {
+// //     pinMode(
+// //       relayPins[i],
+// //       OUTPUT
+// //     );
+
+// //     /*
+// //        Relay OFF at startup.
+
+// //        Active LOW relay:
+// //        HIGH = OFF
+// //     */
+
+// //     digitalWrite(
+// //       relayPins[i],
+// //       HIGH
+// //     );
+
+// //     relayState[i] =
+// //         false;
+// //   }
+
+
+// //   /*************************************************
+// //                     I2C / OLED
+// //   *************************************************/
+
+// //   Wire.begin(
+// //     21,
+// //     22
+// //   );
+
+
+// //   if (!display.begin(
+// //         SSD1306_SWITCHCAPVCC,
+// //         0x3C
+// //       ))
+// //   {
+// //     Serial.println(
+// //       "OLED initialization failed!"
+// //     );
+// //   }
+// //   else
+// //   {
+// //     display.clearDisplay();
+
+// //     display.setTextColor(
+// //       SSD1306_WHITE
+// //     );
+
+// //     display.setTextSize(1);
+
+// //     display.setCursor(
+// //       18,
+// //       15
+// //     );
+
+// //     display.println(
+// //       "SMART AEROPONICS"
+// //     );
+
+// //     display.setCursor(
+// //       28,
+// //       35
+// //     );
+
+// //     display.println(
+// //       "Starting..."
+// //     );
+
+// //     display.display();
+
+// //     delay(1500);
+// //   }
+
+
+// //   /*************************************************
+// //                      DHT
+// //   *************************************************/
+
+// //   dht.begin();
+
+
+// //   /*************************************************
+// //                      WIFI
+// //   *************************************************/
+
+// //   connectWiFi();
+
+
+// //   /*************************************************
+// //                   FIREBASE
+// //   *************************************************/
+
+// //   config.api_key =
+// //       API_KEY;
+
+// //   config.database_url =
+// //       DATABASE_URL;
+
+// //   config.signer.test_mode =
+// //       true;
+
+// //   config.timeout.serverResponse =
+// //       10000;
+
+
+// //   Firebase.begin(
+// //     &config,
+// //     &auth
+// //   );
+
+// //   Firebase.reconnectWiFi(
+// //     true
+// //   );
+
+
+// //   /*************************************************
+// //                      TIME
+// //   *************************************************/
+
+// //   configTime(
+// //     0,
+// //     0,
+// //     "pool.ntp.org",
+// //     "time.nist.gov"
+// //   );
+
+
+// //   /*************************************************
+// //                    WEB SERVER
+// //   *************************************************/
+
+// //   server.on(
+// //     "/",
+// //     handleRoot
+// //   );
+
+// //   server.on(
+// //     "/data",
+// //     handleData
+// //   );
+
+// //   server.on(
+// //     "/toggle",
+// //     handleToggle
+// //   );
+
+// //   server.on(
+// //     "/autoMist",
+// //     handleAutoMist
+// //   );
+
+
+// //   server.begin();
+
+
+// //   Serial.println();
+// //   Serial.println(
+// //     "================================="
+// //   );
+
+// //   Serial.println(
+// //     "SYSTEM READY"
+// //   );
+
+// //   Serial.println(
+// //     "================================="
+// //   );
+
+// //   Serial.print(
+// //     "Dashboard: http://"
+// //   );
+
+// //   Serial.println(
+// //     WiFi.localIP()
+// //   );
+// // }
+
+
+// // /***************************************************
+// //                       LOOP
+// // ***************************************************/
+
+// // void loop()
+// // {
+
+// //   /*************************************************
+// //                     WEB SERVER
+// //   *************************************************/
+
+// //   server.handleClient();
+
+
+// //   /*************************************************
+// //                    WIFI CHECK
+// //   *************************************************/
+
+// //   if (WiFi.status() != WL_CONNECTED)
+// //   {
+// //     Serial.println(
+// //       "WiFi disconnected."
+// //     );
+
+// //     WiFi.reconnect();
+// //   }
+
+
+// //   /*************************************************
+// //                   SENSOR UPDATE
+// //   *************************************************/
+
+// //   if (
+// //     millis() - lastSensor
+// //     >= SENSOR_INTERVAL
+// //   )
+// //   {
+
+// //     lastSensor =
+// //         millis();
+
+// //     readSensors();
+// //   }
+
+
+// //   /*************************************************
+// //                  FIREBASE UPDATE
+// //   *************************************************/
+
+// //   if (
+// //     Firebase.ready() &&
+// //     millis() - lastFirebase
+// //     >= FIREBASE_INTERVAL
+// //   )
+// //   {
+
+// //     lastFirebase =
+// //         millis();
+
+
+// //     sendFirebase();
+
+
+// //     readRelayFirebase();
+// //   }
+
+
+// //   /*************************************************
+// //                     OLED UPDATE
+// //   *************************************************/
+
+// //   if (
+// //     millis() - lastOLED
+// //     >= OLED_INTERVAL
+// //   )
+// //   {
+
+// //     lastOLED =
+// //         millis();
+
+// //     updateOLED();
+// //   }
+// // }
+
+
+
+
+// #include <Arduino.h>
+// #include <WiFi.h>
+// #include <WebServer.h>
+
+// #include <Firebase_ESP_Client.h>
+
+// // Firebase helper files
+// #include <addons/TokenHelper.h>
+// #include <addons/RTDBHelper.h>
+
+// #include <DHT.h>
+// #include <Wire.h>
+// #include <Adafruit_GFX.h>
+// #include <Adafruit_SSD1306.h>
+// #include <time.h>
+
+
+// /***************************************************
+//                     WIFI
+// ***************************************************/
+
+// #define WIFI_SSID "BLOOD"
+// #define WIFI_PASS "1234567890"
+
+
+// /***************************************************
+//                   FIREBASE
+// ***************************************************/
+
+// // Get this from:
+// // Firebase Console
+// // Project Settings
+// // General
+// // Web API Key
+
+// #define API_KEY "AIzaSyBGXLcMMVyDstfx3pdzwa-yv40lQxZ6MV4"
+
+
+// // IMPORTANT:
+// // This must belong to your AEROPONICS Firebase project.
+
+// #define DATABASE_URL \
+// "https://aerophonics-6d377-default-rtdb.firebaseio.com/"
+
+
+// // Firebase Authentication user
+// #define USER_EMAIL "devanshsharma1303@gmail.com"
+// #define USER_PASSWORD "Radha@Devansh1317"
+
+
+// /***************************************************
+//                      SENSORS
+// ***************************************************/
+
+// #define DHTPIN 4
+// #define DHTTYPE DHT11
+
+// #define PH_PIN 34
+
+
+// /***************************************************
+//               AEROPONICS OUTPUTS
+// ***************************************************/
+
+// // Relay 1
+// #define MISTING_PUMP_PIN 16
+
+// // Relay 2
+// #define WATER_PUMP_PIN 17
+
+// // Relay 3
+// #define NUTRIENT_PUMP_PIN 18
+
+// // Relay 4
+// #define FAN_PIN 19
+
+// // Relay 5
+// #define GROW_LIGHT_PIN 23
+
+
+// /***************************************************
+//                   RELAY ARRAY
+// ***************************************************/
+
+// int relayPins[5] =
+// {
+//   MISTING_PUMP_PIN,
+//   WATER_PUMP_PIN,
+//   NUTRIENT_PUMP_PIN,
+//   FAN_PIN,
+//   GROW_LIGHT_PIN
+// };
+
+
+// /***************************************************
+//                      OBJECTS
+// ***************************************************/
+
+// DHT dht(DHTPIN, DHTTYPE);
+
+// FirebaseData fbdo;
+// FirebaseAuth auth;
+// FirebaseConfig config;
+
+// WebServer server(80);
+
+
+// /***************************************************
+//                       OLED
+// ***************************************************/
+
+// #define SCREEN_WIDTH 128
+// #define SCREEN_HEIGHT 64
+
+// Adafruit_SSD1306 display(
+//   SCREEN_WIDTH,
+//   SCREEN_HEIGHT,
+//   &Wire,
+//   -1
+// );
+
+
+// /***************************************************
+//                 SENSOR VARIABLES
+// ***************************************************/
+
+// float temperature = 0.0;
+// float humidity = 0.0;
+// float phValue = 0.0;
+
+
+// /***************************************************
+//                 RELAY VARIABLES
+// ***************************************************/
+
+// bool relayState[5] =
+// {
+//   false,
+//   false,
+//   false,
+//   false,
+//   false
+// };
+
+
+// /***************************************************
+//                     AUTOMATION
+// ***************************************************/
+
+// bool autoMist = false;
+
+
+// /***************************************************
+//                       TIMERS
+// ***************************************************/
+
+// unsigned long lastSensor = 0;
+// unsigned long lastFirebase = 0;
+// unsigned long lastOLED = 0;
+
+// const unsigned long SENSOR_INTERVAL = 2000;
+// const unsigned long FIREBASE_INTERVAL = 5000;
+// const unsigned long OLED_INTERVAL = 2000;
+
+
+// /***************************************************
+//                   pH CALIBRATION
+// ***************************************************/
+
+// float phSlope = -5.70;
+// float phIntercept = 21.34;
+
+
+// /***************************************************
+//                      READ pH
+// ***************************************************/
+
+// float readPH()
+// {
+//   long sum = 0;
+
+//   for (int i = 0; i < 20; i++)
+//   {
+//     sum += analogRead(PH_PIN);
+//     delay(5);
+//   }
+
+//   float average = sum / 20.0;
+
+//   float voltage =
+//       average * (3.3 / 4095.0);
+
+//   float ph =
+//       phSlope * voltage + phIntercept;
+
+//   if (ph < 0)
+//     ph = 0;
+
+//   if (ph > 14)
+//     ph = 14;
+
+//   return ph;
+// }
+
+
+// /***************************************************
+//                   WIFI CONNECT
+// ***************************************************/
+
+// void connectWiFi()
+// {
+//   Serial.println();
+//   Serial.println("=================================");
+//   Serial.println("        WIFI CONNECTION");
+//   Serial.println("=================================");
+
+//   WiFi.mode(WIFI_STA);
+
+//   WiFi.begin(
+//     WIFI_SSID,
+//     WIFI_PASS
+//   );
+
+//   Serial.print("Connecting to: ");
+//   Serial.println(WIFI_SSID);
+
+//   int attempts = 0;
+
+//   while (WiFi.status() != WL_CONNECTED)
+//   {
+//     delay(500);
+
+//     Serial.print(".");
+
+//     attempts++;
+
+//     if (attempts >= 60)
+//     {
+//       Serial.println();
+//       Serial.println("WiFi connection failed.");
+//       Serial.println("Restarting...");
+
+//       ESP.restart();
+//     }
+//   }
+
+//   Serial.println();
+//   Serial.println("WiFi Connected!");
+
+//   Serial.print("IP Address: ");
+//   Serial.println(WiFi.localIP());
+
+//   Serial.print("RSSI: ");
+//   Serial.print(WiFi.RSSI());
+//   Serial.println(" dBm");
+// }
+
+
+// /***************************************************
+//                     READ SENSORS
+// ***************************************************/
+
+// void readSensors()
+// {
+//   float t = dht.readTemperature();
+//   float h = dht.readHumidity();
+
+//   if (!isnan(t))
+//   {
+//     temperature = t;
+//   }
+//   else
+//   {
+//     Serial.println("DHT11 temperature error");
+//   }
+
+//   if (!isnan(h))
+//   {
+//     humidity = h;
+//   }
+//   else
+//   {
+//     Serial.println("DHT11 humidity error");
+//   }
+
+//   phValue = readPH();
+
+//   Serial.println();
+//   Serial.println("--------------------------------");
+
+//   Serial.print("Temperature : ");
+//   Serial.print(temperature, 1);
+//   Serial.println(" C");
+
+//   Serial.print("Humidity    : ");
+//   Serial.print(humidity, 1);
+//   Serial.println(" %");
+
+//   Serial.print("pH          : ");
+//   Serial.println(phValue, 2);
+
+//   Serial.println("--------------------------------");
+// }
+
+
+// /***************************************************
+//                  SET RELAY OUTPUT
+// ***************************************************/
+
+// void setRelay(int index, bool state)
+// {
+//   if (index < 0 || index >= 5)
+//     return;
+
+//   relayState[index] = state;
+
+//   /*
+//      Active LOW relay
+
+//      LOW  = ON
+//      HIGH = OFF
+//   */
+
+//   digitalWrite(
+//     relayPins[index],
+//     state ? LOW : HIGH
+//   );
+// }
+
+
+// /***************************************************
+//                FIREBASE SEND SENSOR
+// ***************************************************/
+
+// void sendFirebase()
+// {
+//   Serial.println();
+//   Serial.println("========== FIREBASE UPDATE ==========");
+
+//   if (!Firebase.ready())
+//   {
+//     Serial.println("Firebase NOT READY");
+
+//     Serial.print("WiFi status: ");
+//     Serial.println(WiFi.status());
+
+//     Serial.println("====================================");
+
+//     return;
+//   }
+
+
+//   /***********************************************
+//                   TEMPERATURE
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/temp",
+//         temperature))
+//   {
+//     Serial.print("Temperature OK: ");
+//     Serial.println(temperature);
+//   }
+//   else
+//   {
+//     Serial.print("Temperature FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                     HUMIDITY
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/hum",
+//         humidity))
+//   {
+//     Serial.print("Humidity OK: ");
+//     Serial.println(humidity);
+//   }
+//   else
+//   {
+//     Serial.print("Humidity FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                        pH
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/ph",
+//         phValue))
+//   {
+//     Serial.print("pH OK: ");
+//     Serial.println(phValue);
+//   }
+//   else
+//   {
+//     Serial.print("pH FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                        HISTORY
+//   ************************************************/
+
+//   time_t now;
+
+//   time(&now);
+
+//   String timestamp;
+
+//   if (now > 100000)
+//   {
+//     timestamp =
+//         String((unsigned long)now);
+//   }
+//   else
+//   {
+//     timestamp =
+//         String(millis());
+//   }
+
+
+//   String path =
+//       "/history/" + timestamp;
+
+
+//   /***********************************************
+//                 HISTORY TEMPERATURE
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/temp",
+//         temperature))
+//   {
+//     Serial.println("History temperature OK");
+//   }
+//   else
+//   {
+//     Serial.print("History temperature FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                   HISTORY HUMIDITY
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/hum",
+//         humidity))
+//   {
+//     Serial.println("History humidity OK");
+//   }
+//   else
+//   {
+//     Serial.print("History humidity FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                      HISTORY pH
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/ph",
+//         phValue))
+//   {
+//     Serial.println("History pH OK");
+//   }
+//   else
+//   {
+//     Serial.print("History pH FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   Serial.println("====================================");
+// }
+
+
+// /***************************************************
+//               FIREBASE READ RELAYS
+// ***************************************************/
+
+// void readRelayFirebase()
+// {
+//   if (!Firebase.ready())
+//     return;
+
+
+//   /***********************************************
+//                     RELAY 1
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay1"))
+//   {
+//     relayState[0] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       0,
+//       relayState[0]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 2
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay2"))
+//   {
+//     relayState[1] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       1,
+//       relayState[1]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 3
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay3"))
+//   {
+//     relayState[2] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       2,
+//       relayState[2]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 4
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay4"))
+//   {
+//     relayState[3] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       3,
+//       relayState[3]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 5
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay5"))
+//   {
+//     relayState[4] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       4,
+//       relayState[4]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     AUTO MIST
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/autoMist"))
+//   {
+//     autoMist =
+//         fbdo.boolData();
+//   }
+
+
+//   /***********************************************
+//                 AUTOMATIC MISTING
+//   ************************************************/
+
+//   if (autoMist)
+//   {
+//     if (humidity < 60.0)
+//     {
+//       setRelay(
+//         0,
+//         true
+//       );
+//     }
+//     else
+//     {
+//       setRelay(
+//         0,
+//         false
+//       );
+//     }
+//   }
+
+//   Serial.println("Firebase control synchronized");
+// }
+
+
+// /***************************************************
+//                     OLED DISPLAY
+// ***************************************************/
+
+// void updateOLED()
+// {
+//   display.clearDisplay();
+
+//   display.setTextColor(
+//     SSD1306_WHITE
+//   );
+
+
+//   /***********************************************
+//                      HEADER
+//   ************************************************/
+
+//   display.setTextSize(1);
+
+//   display.setCursor(
+//     25,
+//     0
+//   );
+
+//   display.println(
+//     "AEROPONICS"
+//   );
+
+//   display.drawLine(
+//     0,
+//     10,
+//     127,
+//     10,
+//     SSD1306_WHITE
+//   );
+
+
+//   /***********************************************
+//                   TEMPERATURE
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     16
+//   );
+
+//   display.print("TEMP:");
+
+//   display.print(
+//     temperature,
+//     1
+//   );
+
+//   display.print("C");
+
+
+//   /***********************************************
+//                     HUMIDITY
+//   ************************************************/
+
+//   display.setCursor(
+//     67,
+//     16
+//   );
+
+//   display.print("H:");
+
+//   display.print(
+//     humidity,
+//     0
+//   );
+
+//   display.print("%");
+
+
+//   /***********************************************
+//                        pH
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     31
+//   );
+
+//   display.print("pH:");
+
+//   display.print(
+//     phValue,
+//     2
+//   );
+
+
+//   /***********************************************
+//                     AUTOMATION
+//   ************************************************/
+
+//   display.setCursor(
+//     67,
+//     31
+//   );
+
+//   display.print("AUTO:");
+
+//   if (autoMist)
+//     display.print("ON");
+//   else
+//     display.print("OFF");
+
+
+//   /***********************************************
+//                      ACTUATORS
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     46
+//   );
+
+//   display.print("M:");
+
+//   display.print(
+//     relayState[0] ? "ON " : "OFF"
+//   );
+
+//   display.print(" W:");
+
+//   display.print(
+//     relayState[1] ? "ON" : "OFF"
+//   );
+
+
+//   /***********************************************
+//                     WIFI STATUS
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     57
+//   );
+
+//   if (WiFi.status() == WL_CONNECTED)
+//   {
+//     display.print("WiFi OK");
+//   }
+//   else
+//   {
+//     display.print("WiFi OFF");
+//   }
+
+//   display.display();
+// }
+
+
+// /***************************************************
+//                  LOCAL DASHBOARD
+// ***************************************************/
+
+// String html = R"rawliteral(
+
+// <!DOCTYPE html>
+
+// <html>
+
+// <head>
+
+// <meta name="viewport"
+// content="width=device-width,
+// initial-scale=1">
+
+// <title>Aeroponics Control</title>
+
+// <style>
+
+// body
+// {
+//   background:#0b0f19;
+//   color:white;
+//   font-family:Arial;
+//   text-align:center;
+//   margin:0;
+//   padding:15px;
+// }
+
+// h2
+// {
+//   color:#00e5ff;
+// }
+
+// .card
+// {
+//   background:#141a2e;
+//   margin:12px auto;
+//   padding:18px;
+//   border-radius:12px;
+//   max-width:500px;
+
+//   box-shadow:
+//   0 0 15px #00e5ff44;
+// }
+
+// .value
+// {
+//   font-size:22px;
+//   font-weight:bold;
+// }
+
+// button
+// {
+//   padding:12px 18px;
+//   margin:6px;
+
+//   border:none;
+//   border-radius:8px;
+
+//   background:#00e5ff;
+
+//   color:black;
+
+//   font-size:15px;
+
+//   cursor:pointer;
+// }
+
+// button:hover
+// {
+//   background:#00bcd4;
+// }
+
+// .status
+// {
+//   margin:8px;
+//   padding:10px;
+
+//   border-radius:8px;
+
+//   background:#202942;
+// }
+
+// </style>
+
+// </head>
+
+
+// <body>
+
+
+// <h2>🌱 SMART AEROPONICS</h2>
+
+
+// <div class="card">
+
+// <h3>Sensor Monitoring</h3>
+
+
+// <div class="status">
+
+// Temperature:
+// <span class="value"
+// id="temp">
+// --
+// </span>
+// °C
+
+// </div>
+
+
+// <div class="status">
+
+// Humidity:
+// <span class="value"
+// id="hum">
+// --
+// </span>
+// %
+
+// </div>
+
+
+// <div class="status">
+
+// pH:
+// <span class="value"
+// id="ph">
+// --
+// </span>
+
+// </div>
+
+// </div>
+
+
+// <div class="card">
+
+// <h3>Actuator Control</h3>
+
+
+// <button onclick="toggle(1)">
+// 🌫 Misting Pump
+// </button>
+
+
+// <button onclick="toggle(2)">
+// 💧 Water Pump
+// </button>
+
+
+// <button onclick="toggle(3)">
+// 🧪 Nutrient Pump
+// </button>
+
+
+// <button onclick="toggle(4)">
+// 🌀 Fan
+// </button>
+
+
+// <button onclick="toggle(5)">
+// 💡 Grow Light
+// </button>
+
+
+// </div>
+
+
+// <div class="card">
+
+// <h3>Automation</h3>
+
+
+// <button onclick="toggleAuto()">
+
+// 🤖 Automatic Misting
+
+// </button>
+
+
+// <p>
+
+// Automation:
+// <span id="auto">
+// OFF
+// </span>
+
+// </p>
+
+// </div>
+
+
+// <script>
+
+
+// function fetchData()
+// {
+
+//   fetch("/data")
+
+//   .then(res => res.json())
+
+//   .then(data =>
+//   {
+
+//     document.getElementById(
+//       "temp"
+//     ).innerText =
+//       Number(data.temp).toFixed(1);
+
+
+//     document.getElementById(
+//       "hum"
+//     ).innerText =
+//       Number(data.hum).toFixed(1);
+
+
+//     document.getElementById(
+//       "ph"
+//     ).innerText =
+//       Number(data.ph).toFixed(2);
+
+
+//     document.getElementById(
+//       "auto"
+//     ).innerText =
+//       data.autoMist ?
+//       "ON" :
+//       "OFF";
+
+//   });
+
+// }
+
+
+// function toggle(r)
+// {
+
+//   fetch(
+//     "/toggle?relay=" + r
+//   )
+
+//   .then(() =>
+//   {
+//     fetchData();
+//   });
+
+// }
+
+
+// function toggleAuto()
+// {
+
+//   fetch("/autoMist")
+
+//   .then(() =>
+//   {
+//     fetchData();
+//   });
+
+// }
+
+
+// fetchData();
+
+
+// setInterval(
+//   fetchData,
+//   2000
+// );
+
+
+// </script>
+
+
+// </body>
+
+// </html>
+
+// )rawliteral";
+
+
+// /***************************************************
+//                     WEB ROOT
+// ***************************************************/
+
+// void handleRoot()
+// {
+//   server.send(
+//     200,
+//     "text/html",
+//     html
+//   );
+// }
+
+
+// /***************************************************
+//                     WEB DATA
+// ***************************************************/
+
+// void handleData()
+// {
+//   String json = "{";
+
+//   json +=
+//       "\"temp\":" +
+//       String(temperature, 2) +
+//       ",";
+
+//   json +=
+//       "\"hum\":" +
+//       String(humidity, 2) +
+//       ",";
+
+//   json +=
+//       "\"ph\":" +
+//       String(phValue, 2) +
+//       ",";
+
+//   json +=
+//       "\"autoMist\":" +
+//       String(
+//         autoMist ? "true" : "false"
+//       );
+
+//   json += "}";
+
+
+//   server.send(
+//     200,
+//     "application/json",
+//     json
+//   );
+// }
+
+
+// /***************************************************
+//                  WEB RELAY CONTROL
+// ***************************************************/
+
+// void handleToggle()
+// {
+//   if (!server.hasArg("relay"))
+//   {
+//     server.send(
+//       400,
+//       "text/plain",
+//       "Missing relay"
+//     );
+
+//     return;
+//   }
+
+
+//   int relay =
+//       server.arg("relay").toInt() - 1;
+
+
+//   if (relay < 0 || relay >= 5)
+//   {
+//     server.send(
+//       400,
+//       "text/plain",
+//       "Invalid relay"
+//     );
+
+//     return;
+//   }
+
+
+//   relayState[relay] =
+//       !relayState[relay];
+
+
+//   setRelay(
+//     relay,
+//     relayState[relay]
+//   );
+
+
+//   if (Firebase.ready())
+//   {
+//     String path =
+//         "/control/relay" +
+//         String(relay + 1);
+
+//     if (Firebase.RTDB.setBool(
+//           &fbdo,
+//           path,
+//           relayState[relay]))
+//     {
+//       Serial.print("Relay Firebase OK: ");
+//       Serial.println(path);
+//     }
+//     else
+//     {
+//       Serial.print("Relay Firebase ERROR: ");
+//       Serial.println(fbdo.errorReason());
+//     }
+//   }
+
+
+//   server.send(
+//     200,
+//     "text/plain",
+//     "OK"
+//   );
+// }
+
+
+// /***************************************************
+//               WEB AUTO MIST CONTROL
+// ***************************************************/
+
+// void handleAutoMist()
+// {
+//   autoMist =
+//       !autoMist;
+
+
+//   if (Firebase.ready())
+//   {
+//     if (Firebase.RTDB.setBool(
+//           &fbdo,
+//           "/control/autoMist",
+//           autoMist))
+//     {
+//       Serial.println(
+//         "Auto Mist Firebase OK"
+//       );
+//     }
+//     else
+//     {
+//       Serial.print(
+//         "Auto Mist Firebase ERROR: "
+//       );
+
+//       Serial.println(
+//         fbdo.errorReason()
+//       );
+//     }
+//   }
+
+
+//   server.send(
+//     200,
+//     "text/plain",
+//     "OK"
+//   );
+// }
+
+
+// /***************************************************
+//                        SETUP
+// ***************************************************/
+
+// void setup()
+// {
+//   Serial.begin(9600);
+
+//   delay(1000);
+
+
+//   Serial.println();
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.println(
+//     " SMART AEROPONICS i-BOT ESP32"
+//   );
+
+//   Serial.println(
+//     "================================="
+//   );
+
+
+//   /***********************************************
+//                   ADC CONFIGURATION
+//   ************************************************/
+
+//   analogReadResolution(12);
+
+//   analogSetAttenuation(
+//     ADC_11db
+//   );
+
+
+//   /***********************************************
+//                     RELAY SETUP
+//   ************************************************/
+
+//   for (int i = 0; i < 5; i++)
+//   {
+//     pinMode(
+//       relayPins[i],
+//       OUTPUT
+//     );
+
+//     digitalWrite(
+//       relayPins[i],
+//       HIGH
+//     );
+
+//     relayState[i] =
+//         false;
+//   }
+
+
+//   /***********************************************
+//                       I2C / OLED
+//   ************************************************/
+
+//   Wire.begin(
+//     21,
+//     22
+//   );
+
+
+//   if (!display.begin(
+//         SSD1306_SWITCHCAPVCC,
+//         0x3C
+//       ))
+//   {
+//     Serial.println(
+//       "OLED initialization failed!"
+//     );
+//   }
+//   else
+//   {
+//     display.clearDisplay();
+
+//     display.setTextColor(
+//       SSD1306_WHITE
+//     );
+
+//     display.setTextSize(1);
+
+//     display.setCursor(
+//       18,
+//       15
+//     );
+
+//     display.println(
+//       "SMART AEROPONICS"
+//     );
+
+//     display.setCursor(
+//       28,
+//       35
+//     );
+
+//     display.println(
+//       "Starting..."
+//     );
+
+//     display.display();
+
+//     delay(1500);
+//   }
+
+
+//   /***********************************************
+//                        DHT
+//   ************************************************/
+
+//   dht.begin();
+
+
+//   /***********************************************
+//                        WIFI
+//   ************************************************/
+
+//   connectWiFi();
+
+
+//   /***********************************************
+//                     FIREBASE
+//   ************************************************/
+
+//   config.api_key =
+//       API_KEY;
+
+//   config.database_url =
+//       DATABASE_URL;
+
+
+//   /*
+//      Firebase Email/Password
+//      Authentication
+//   */
+
+//   auth.user.email =
+//       USER_EMAIL;
+
+//   auth.user.password =
+//       USER_PASSWORD;
+
+
+//   /*
+//      Token status callback
+//   */
+
+//   config.token_status_callback =
+//       tokenStatusCallback;
+
+
+//   /*
+//      Server response timeout
+//   */
+
+//   config.timeout.serverResponse =
+//       10000;
+
+
+//   /*
+//      Start Firebase
+//   */
+
+//   Firebase.begin(
+//     &config,
+//     &auth
+//   );
+
+//   Firebase.reconnectWiFi(
+//     true
+//   );
+
+
+//   /***********************************************
+//                     FIREBASE STATUS
+//   ************************************************/
+
+//   Serial.println();
+//   Serial.println(
+//     "========== FIREBASE =========="
+//   );
+
+//   Serial.print(
+//     "Database URL: "
+//   );
+
+//   Serial.println(
+//     DATABASE_URL
+//   );
+
+//   Serial.print(
+//     "Firebase Ready: "
+//   );
+
+//   Serial.println(
+//     Firebase.ready()
+//   );
+
+//   Serial.println(
+//     "=============================="
+//   );
+
+
+//   /***********************************************
+//                        TIME
+//   ************************************************/
+
+//   configTime(
+//     0,
+//     0,
+//     "pool.ntp.org",
+//     "time.nist.gov"
+//   );
+
+
+//   /***********************************************
+//                    WEB SERVER
+//   ************************************************/
+
+//   server.on(
+//     "/",
+//     handleRoot
+//   );
+
+//   server.on(
+//     "/data",
+//     handleData
+//   );
+
+//   server.on(
+//     "/toggle",
+//     handleToggle
+//   );
+
+//   server.on(
+//     "/autoMist",
+//     handleAutoMist
+//   );
+
+
+//   server.begin();
+
+
+//   Serial.println();
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.println(
+//     "SYSTEM READY"
+//   );
+
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.print(
+//     "Dashboard: http://"
+//   );
+
+//   Serial.println(
+//     WiFi.localIP()
+//   );
+// }
+
+
+// /***************************************************
+//                       LOOP
+// ***************************************************/
+
+// void loop()
+// {
+//   /***********************************************
+//                   WEB SERVER
+//   ************************************************/
+
+//   server.handleClient();
+
+
+//   /***********************************************
+//                    WIFI CHECK
+//   ************************************************/
+
+//   if (WiFi.status() != WL_CONNECTED)
+//   {
+//     Serial.println(
+//       "WiFi disconnected."
+//     );
+
+//     WiFi.reconnect();
+//   }
+
+
+//   /***********************************************
+//                   SENSOR UPDATE
+//   ************************************************/
+
+//   if (
+//     millis() - lastSensor
+//     >= SENSOR_INTERVAL
+//   )
+//   {
+//     lastSensor =
+//         millis();
+
+//     readSensors();
+//   }
+
+
+//   /***********************************************
+//                  FIREBASE UPDATE
+//   ************************************************/
+
+//   if (
+//     Firebase.ready() &&
+//     millis() - lastFirebase
+//     >= FIREBASE_INTERVAL
+//   )
+//   {
+//     lastFirebase =
+//         millis();
+
+//     sendFirebase();
+
+//     readRelayFirebase();
+//   }
+
+
+//   /***********************************************
+//                     OLED UPDATE
+//   ************************************************/
+
+//   if (
+//     millis() - lastOLED
+//     >= OLED_INTERVAL
+//   )
+//   {
+//     lastOLED =
+//         millis();
+
+//     updateOLED();
+//   }
+// }
+
+
+
+
+// #include <Arduino.h>
+// #include <WiFi.h>
+// #include <WebServer.h>
+
+// #include <Firebase_ESP_Client.h>
+
+// // Firebase helper files
+// #include <addons/TokenHelper.h>
+// #include <addons/RTDBHelper.h>
+
+// #include <DHT.h>
+// #include <Wire.h>
+// #include <Adafruit_GFX.h>
+// #include <Adafruit_SSD1306.h>
+// #include <time.h>
+
+
+// /***************************************************
+//                     WIFI
+// ***************************************************/
+
+// #define WIFI_SSID "D"
+// #define WIFI_PASS "12345678900"
+
+
+/***************************************************
+                  FIREBASE
+***************************************************/
+
+// Get this from:
+// Firebase Console
+// Project Settings
+// General
+// Web API Key
+
+// #define API_KEY "AIzaSyBGXLcMMVyDstfx3pdzwa-yv40lQxZ6MV4"
+
+
+// // IMPORTANT:
+// // This must belong to your AEROPONICS Firebase project.
+
+// #define DATABASE_URL \
+// "https://aerophonics-6d377-default-rtdb.firebaseio.com/"
+
+
+// // Firebase Authentication user
+// #define USER_EMAIL "devanshsharma1303@gmail.com"
+// #define USER_PASSWORD "Radha@Devansh1317"
+
+
+// /***************************************************
+//               I-BOT ESP32 PIN MAPPING
+// ***************************************************/
+
+// /*
+//   Board used:
+//   I-BOT ESP32 development board
+
+//   Sensors:
+//     DHT11 DATA       -> GPIO4
+//     pH analog OUT    -> GPIO34
+//     OLED SDA         -> GPIO21
+//     OLED SCL         -> GPIO22
+
+//   Aeroponics relay outputs:
+//     Relay 1 Misting Pump  -> GPIO25
+//     Relay 2 Water Pump    -> GPIO26
+//     Relay 3 Nutrient Pump -> GPIO27
+//     Relay 4 Fan           -> GPIO32
+//     Relay 5 Grow Light    -> GPIO33
+
+//   Relay logic:
+//     LOW  = ON
+//     HIGH = OFF
+
+//   IMPORTANT:
+//     Do not power pumps directly from ESP32 GPIO pins.
+//     Use relay/MOSFET driver stages and suitable external
+//     power supplies.
+// */
+
+// /***************************************************
+//                      SENSORS
+// ***************************************************/
+
+// #define DHTPIN 4
+// #define DHTTYPE DHT11
+
+// #define PH_PIN 34
+
+
+// /***************************************************
+//               AEROPONICS OUTPUTS
+// ***************************************************/
+
+// // Relay 1
+// #define MISTING_PUMP_PIN 25
+
+// // Relay 2
+// #define WATER_PUMP_PIN 26
+
+// // Relay 3
+// #define NUTRIENT_PUMP_PIN 27
+
+// // Relay 4
+// #define FAN_PIN 32
+
+// // Relay 5
+// #define GROW_LIGHT_PIN 33
+
+
+// /***************************************************
+//                   RELAY ARRAY
+// ***************************************************/
+
+// int relayPins[5] =
+// {
+//   MISTING_PUMP_PIN,
+//   WATER_PUMP_PIN,
+//   NUTRIENT_PUMP_PIN,
+//   FAN_PIN,
+//   GROW_LIGHT_PIN
+// };
+
+
+// /***************************************************
+//                      OBJECTS
+// ***************************************************/
+
+// DHT dht(DHTPIN, DHTTYPE);
+
+// FirebaseData fbdo;
+// FirebaseAuth auth;
+// FirebaseConfig config;
+
+// WebServer server(80);
+
+
+// /***************************************************
+//                       OLED
+// ***************************************************/
+
+// #define SCREEN_WIDTH 128
+// #define SCREEN_HEIGHT 64
+
+// Adafruit_SSD1306 display(
+//   SCREEN_WIDTH,
+//   SCREEN_HEIGHT,
+//   &Wire,
+//   -1
+// );
+
+
+// /***************************************************
+//                 SENSOR VARIABLES
+// ***************************************************/
+
+// float temperature = 0.0;
+// float humidity = 0.0;
+// float phValue = 0.0;
+
+
+// /***************************************************
+//                 RELAY VARIABLES
+// ***************************************************/
+
+// bool relayState[5] =
+// {
+//   false,
+//   false,
+//   false,
+//   false,
+//   false
+// };
+
+
+// /***************************************************
+//                     AUTOMATION
+// ***************************************************/
+
+// bool autoMist = false;
+
+
+// /***************************************************
+//                       TIMERS
+// ***************************************************/
+
+// unsigned long lastSensor = 0;
+// unsigned long lastFirebase = 0;
+// unsigned long lastOLED = 0;
+
+// const unsigned long SENSOR_INTERVAL = 2000;
+// const unsigned long FIREBASE_INTERVAL = 5000;
+// const unsigned long OLED_INTERVAL = 2000;
+
+
+// /***************************************************
+//                   pH CALIBRATION
+// ***************************************************/
+
+// float phSlope = -5.70;
+// float phIntercept = 21.34;
+
+
+// /***************************************************
+//                      READ pH
+// ***************************************************/
+
+// float readPH()
+// {
+//   long sum = 0;
+
+//   for (int i = 0; i < 20; i++)
+//   {
+//     sum += analogRead(PH_PIN);
+//     delay(5);
+//   }
+
+//   float average = sum / 20.0;
+
+//   float voltage =
+//       average * (3.3 / 4095.0);
+
+//   float ph =
+//       phSlope * voltage + phIntercept;
+
+//   if (ph < 0)
+//     ph = 0;
+
+//   if (ph > 14)
+//     ph = 14;
+
+//   return ph;
+// }
+
+
+// /***************************************************
+//                   WIFI CONNECT
+// ***************************************************/
+
+// void connectWiFi()
+// {
+//   Serial.println();
+//   Serial.println("=================================");
+//   Serial.println("        WIFI CONNECTION");
+//   Serial.println("=================================");
+
+//   WiFi.mode(WIFI_STA);
+
+//   WiFi.begin(
+//     WIFI_SSID,
+//     WIFI_PASS
+//   );
+
+//   Serial.print("Connecting to: ");
+//   Serial.println(WIFI_SSID);
+
+//   int attempts = 0;
+
+//   while (WiFi.status() != WL_CONNECTED)
+//   {
+//     delay(500);
+
+//     Serial.print(".");
+
+//     attempts++;
+
+//     if (attempts >= 60)
+//     {
+//       Serial.println();
+//       Serial.println("WiFi connection failed.");
+//       Serial.println("Restarting...");
+
+//       ESP.restart();
+//     }
+//   }
+
+//   Serial.println();
+//   Serial.println("WiFi Connected!");
+
+//   Serial.print("IP Address: ");
+//   Serial.println(WiFi.localIP());
+
+//   Serial.print("RSSI: ");
+//   Serial.print(WiFi.RSSI());
+//   Serial.println(" dBm");
+// }
+
+
+// /***************************************************
+//                     READ SENSORS
+// ***************************************************/
+
+// void readSensors()
+// {
+//   float t = dht.readTemperature();
+//   float h = dht.readHumidity();
+
+//   if (!isnan(t))
+//   {
+//     temperature = t;
+//   }
+//   else
+//   {
+//     Serial.println("DHT11 temperature error");
+//   }
+
+//   if (!isnan(h))
+//   {
+//     humidity = h;
+//   }
+//   else
+//   {
+//     Serial.println("DHT11 humidity error");
+//   }
+
+//   phValue = readPH();
+
+//   Serial.println();
+//   Serial.println("--------------------------------");
+
+//   Serial.print("Temperature : ");
+//   Serial.print(temperature, 1);
+//   Serial.println(" C");
+
+//   Serial.print("Humidity    : ");
+//   Serial.print(humidity, 1);
+//   Serial.println(" %");
+
+//   Serial.print("pH          : ");
+//   Serial.println(phValue, 2);
+
+//   Serial.println("--------------------------------");
+// }
+
+
+// /***************************************************
+//                  SET RELAY OUTPUT
+// ***************************************************/
+
+// void setRelay(int index, bool state)
+// {
+//   if (index < 0 || index >= 5)
+//     return;
+
+//   relayState[index] = state;
+
+//   /*
+//      Active LOW relay
+
+//      LOW  = ON
+//      HIGH = OFF
+//   */
+
+//   digitalWrite(
+//     relayPins[index],
+//     state ? LOW : HIGH
+//   );
+// }
+
+
+// /***************************************************
+//                FIREBASE SEND SENSOR
+// ***************************************************/
+
+// void sendFirebase()
+// {
+//   Serial.println();
+//   Serial.println("========== FIREBASE UPDATE ==========");
+
+//   if (!Firebase.ready())
+//   {
+//     Serial.println("Firebase NOT READY");
+
+//     Serial.print("WiFi status: ");
+//     Serial.println(WiFi.status());
+
+//     Serial.println("====================================");
+
+//     return;
+//   }
+
+
+//   /***********************************************
+//                   TEMPERATURE
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/temp",
+//         temperature))
+//   {
+//     Serial.print("Temperature OK: ");
+//     Serial.println(temperature);
+//   }
+//   else
+//   {
+//     Serial.print("Temperature FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                     HUMIDITY
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/hum",
+//         humidity))
+//   {
+//     Serial.print("Humidity OK: ");
+//     Serial.println(humidity);
+//   }
+//   else
+//   {
+//     Serial.print("Humidity FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                        pH
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         "/sensor/ph",
+//         phValue))
+//   {
+//     Serial.print("pH OK: ");
+//     Serial.println(phValue);
+//   }
+//   else
+//   {
+//     Serial.print("pH FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                        HISTORY
+//   ************************************************/
+
+//   time_t now;
+
+//   time(&now);
+
+//   String timestamp;
+
+//   if (now > 100000)
+//   {
+//     timestamp =
+//         String((unsigned long)now);
+//   }
+//   else
+//   {
+//     timestamp =
+//         String(millis());
+//   }
+
+
+//   String path =
+//       "/history/" + timestamp;
+
+
+//   /***********************************************
+//                 HISTORY TEMPERATURE
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/temp",
+//         temperature))
+//   {
+//     Serial.println("History temperature OK");
+//   }
+//   else
+//   {
+//     Serial.print("History temperature FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                   HISTORY HUMIDITY
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/hum",
+//         humidity))
+//   {
+//     Serial.println("History humidity OK");
+//   }
+//   else
+//   {
+//     Serial.print("History humidity FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   /***********************************************
+//                      HISTORY pH
+//   ************************************************/
+
+//   if (Firebase.RTDB.setFloat(
+//         &fbdo,
+//         path + "/ph",
+//         phValue))
+//   {
+//     Serial.println("History pH OK");
+//   }
+//   else
+//   {
+//     Serial.print("History pH FAILED: ");
+//     Serial.println(fbdo.errorReason());
+//   }
+
+
+//   Serial.println("====================================");
+// }
+
+
+// /***************************************************
+//               FIREBASE READ RELAYS
+// ***************************************************/
+
+// void readRelayFirebase()
+// {
+//   if (!Firebase.ready())
+//     return;
+
+
+//   /***********************************************
+//                     RELAY 1
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay1"))
+//   {
+//     relayState[0] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       0,
+//       relayState[0]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 2
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay2"))
+//   {
+//     relayState[1] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       1,
+//       relayState[1]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 3
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay3"))
+//   {
+//     relayState[2] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       2,
+//       relayState[2]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 4
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay4"))
+//   {
+//     relayState[3] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       3,
+//       relayState[3]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     RELAY 5
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/relay5"))
+//   {
+//     relayState[4] =
+//         fbdo.boolData();
+
+//     setRelay(
+//       4,
+//       relayState[4]
+//     );
+//   }
+
+
+//   /***********************************************
+//                     AUTO MIST
+//   ************************************************/
+
+//   if (Firebase.RTDB.getBool(
+//         &fbdo,
+//         "/control/autoMist"))
+//   {
+//     autoMist =
+//         fbdo.boolData();
+//   }
+
+
+//   /***********************************************
+//                 AUTOMATIC MISTING
+//   ************************************************/
+
+//   if (autoMist)
+//   {
+//     if (humidity < 60.0)
+//     {
+//       setRelay(
+//         0,
+//         true
+//       );
+//     }
+//     else
+//     {
+//       setRelay(
+//         0,
+//         false
+//       );
+//     }
+//   }
+
+//   Serial.println("Firebase control synchronized");
+// }
+
+
+// /***************************************************
+//                     OLED DISPLAY
+// ***************************************************/
+
+// void updateOLED()
+// {
+//   display.clearDisplay();
+
+//   display.setTextColor(
+//     SSD1306_WHITE
+//   );
+
+
+//   /***********************************************
+//                      HEADER
+//   ************************************************/
+
+//   display.setTextSize(1);
+
+//   display.setCursor(
+//     25,
+//     0
+//   );
+
+//   display.println(
+//     "AEROPONICS"
+//   );
+
+//   display.drawLine(
+//     0,
+//     10,
+//     127,
+//     10,
+//     SSD1306_WHITE
+//   );
+
+
+//   /***********************************************
+//                   TEMPERATURE
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     16
+//   );
+
+//   display.print("TEMP:");
+
+//   display.print(
+//     temperature,
+//     1
+//   );
+
+//   display.print("C");
+
+
+//   /***********************************************
+//                     HUMIDITY
+//   ************************************************/
+
+//   display.setCursor(
+//     67,
+//     16
+//   );
+
+//   display.print("H:");
+
+//   display.print(
+//     humidity,
+//     0
+//   );
+
+//   display.print("%");
+
+
+//   /***********************************************
+//                        pH
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     31
+//   );
+
+//   display.print("pH:");
+
+//   display.print(
+//     phValue,
+//     2
+//   );
+
+
+//   /***********************************************
+//                     AUTOMATION
+//   ************************************************/
+
+//   display.setCursor(
+//     67,
+//     31
+//   );
+
+//   display.print("AUTO:");
+
+//   if (autoMist)
+//     display.print("ON");
+//   else
+//     display.print("OFF");
+
+
+//   /***********************************************
+//                      ACTUATORS
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     46
+//   );
+
+//   display.print("M:");
+
+//   display.print(
+//     relayState[0] ? "ON " : "OFF"
+//   );
+
+//   display.print(" W:");
+
+//   display.print(
+//     relayState[1] ? "ON" : "OFF"
+//   );
+
+
+//   /***********************************************
+//                     WIFI STATUS
+//   ************************************************/
+
+//   display.setCursor(
+//     3,
+//     57
+//   );
+
+//   if (WiFi.status() == WL_CONNECTED)
+//   {
+//     display.print("WiFi OK");
+//   }
+//   else
+//   {
+//     display.print("WiFi OFF");
+//   }
+
+//   display.display();
+// }
+
+
+// /***************************************************
+//                  LOCAL DASHBOARD
+// ***************************************************/
+
+// String html = R"rawliteral(
+
+// <!DOCTYPE html>
+
+// <html>
+
+// <head>
+
+// <meta name="viewport"
+// content="width=device-width,
+// initial-scale=1">
+
+// <title>Aeroponics Control</title>
+
+// <style>
+
+// body
+// {
+//   background:#0b0f19;
+//   color:white;
+//   font-family:Arial;
+//   text-align:center;
+//   margin:0;
+//   padding:15px;
+// }
+
+// h2
+// {
+//   color:#00e5ff;
+// }
+
+// .card
+// {
+//   background:#141a2e;
+//   margin:12px auto;
+//   padding:18px;
+//   border-radius:12px;
+//   max-width:500px;
+
+//   box-shadow:
+//   0 0 15px #00e5ff44;
+// }
+
+// .value
+// {
+//   font-size:22px;
+//   font-weight:bold;
+// }
+
+// button
+// {
+//   padding:12px 18px;
+//   margin:6px;
+
+//   border:none;
+//   border-radius:8px;
+
+//   background:#00e5ff;
+
+//   color:black;
+
+//   font-size:15px;
+
+//   cursor:pointer;
+// }
+
+// button:hover
+// {
+//   background:#00bcd4;
+// }
+
+// .status
+// {
+//   margin:8px;
+//   padding:10px;
+
+//   border-radius:8px;
+
+//   background:#202942;
+// }
+
+// </style>
+
+// </head>
+
+
+// <body>
+
+
+// <h2>🌱 SMART AEROPONICS</h2>
+
+
+// <div class="card">
+
+// <h3>Sensor Monitoring</h3>
+
+
+// <div class="status">
+
+// Temperature:
+// <span class="value"
+// id="temp">
+// --
+// </span>
+// °C
+
+// </div>
+
+
+// <div class="status">
+
+// Humidity:
+// <span class="value"
+// id="hum">
+// --
+// </span>
+// %
+
+// </div>
+
+
+// <div class="status">
+
+// pH:
+// <span class="value"
+// id="ph">
+// --
+// </span>
+
+// </div>
+
+// </div>
+
+
+// <div class="card">
+
+// <h3>Actuator Control</h3>
+
+
+// <button onclick="toggle(1)">
+// 🌫 Misting Pump
+// </button>
+
+
+// <button onclick="toggle(2)">
+// 💧 Water Pump
+// </button>
+
+
+// <button onclick="toggle(3)">
+// 🧪 Nutrient Pump
+// </button>
+
+
+// <button onclick="toggle(4)">
+// 🌀 Fan
+// </button>
+
+
+// <button onclick="toggle(5)">
+// 💡 Grow Light
+// </button>
+
+
+// </div>
+
+
+// <div class="card">
+
+// <h3>Automation</h3>
+
+
+// <button onclick="toggleAuto()">
+
+// 🤖 Automatic Misting
+
+// </button>
+
+
+// <p>
+
+// Automation:
+// <span id="auto">
+// OFF
+// </span>
+
+// </p>
+
+// </div>
+
+
+// <script>
+
+
+// function fetchData()
+// {
+
+//   fetch("/data")
+
+//   .then(res => res.json())
+
+//   .then(data =>
+//   {
+
+//     document.getElementById(
+//       "temp"
+//     ).innerText =
+//       Number(data.temp).toFixed(1);
+
+
+//     document.getElementById(
+//       "hum"
+//     ).innerText =
+//       Number(data.hum).toFixed(1);
+
+
+//     document.getElementById(
+//       "ph"
+//     ).innerText =
+//       Number(data.ph).toFixed(2);
+
+
+//     document.getElementById(
+//       "auto"
+//     ).innerText =
+//       data.autoMist ?
+//       "ON" :
+//       "OFF";
+
+//   });
+
+// }
+
+
+// function toggle(r)
+// {
+
+//   fetch(
+//     "/toggle?relay=" + r
+//   )
+
+//   .then(() =>
+//   {
+//     fetchData();
+//   });
+
+// }
+
+
+// function toggleAuto()
+// {
+
+//   fetch("/autoMist")
+
+//   .then(() =>
+//   {
+//     fetchData();
+//   });
+
+// }
+
+
+// fetchData();
+
+
+// setInterval(
+//   fetchData,
+//   2000
+// );
+
+
+// </script>
+
+
+// </body>
+
+// </html>
+
+// )rawliteral";
+
+
+// /***************************************************
+//                     WEB ROOT
+// ***************************************************/
+
+// void handleRoot()
+// {
+//   server.send(
+//     200,
+//     "text/html",
+//     html
+//   );
+// }
+
+
+// /***************************************************
+//                     WEB DATA
+// ***************************************************/
+
+// void handleData()
+// {
+//   String json = "{";
+
+//   json +=
+//       "\"temp\":" +
+//       String(temperature, 2) +
+//       ",";
+
+//   json +=
+//       "\"hum\":" +
+//       String(humidity, 2) +
+//       ",";
+
+//   json +=
+//       "\"ph\":" +
+//       String(phValue, 2) +
+//       ",";
+
+//   json +=
+//       "\"autoMist\":" +
+//       String(
+//         autoMist ? "true" : "false"
+//       );
+
+//   json += "}";
+
+
+//   server.send(
+//     200,
+//     "application/json",
+//     json
+//   );
+// }
+
+
+// /***************************************************
+//                  WEB RELAY CONTROL
+// ***************************************************/
+
+// void handleToggle()
+// {
+//   if (!server.hasArg("relay"))
+//   {
+//     server.send(
+//       400,
+//       "text/plain",
+//       "Missing relay"
+//     );
+
+//     return;
+//   }
+
+
+//   int relay =
+//       server.arg("relay").toInt() - 1;
+
+
+//   if (relay < 0 || relay >= 5)
+//   {
+//     server.send(
+//       400,
+//       "text/plain",
+//       "Invalid relay"
+//     );
+
+//     return;
+//   }
+
+
+//   relayState[relay] =
+//       !relayState[relay];
+
+
+//   setRelay(
+//     relay,
+//     relayState[relay]
+//   );
+
+
+//   if (Firebase.ready())
+//   {
+//     String path =
+//         "/control/relay" +
+//         String(relay + 1);
+
+//     if (Firebase.RTDB.setBool(
+//           &fbdo,
+//           path,
+//           relayState[relay]))
+//     {
+//       Serial.print("Relay Firebase OK: ");
+//       Serial.println(path);
+//     }
+//     else
+//     {
+//       Serial.print("Relay Firebase ERROR: ");
+//       Serial.println(fbdo.errorReason());
+//     }
+//   }
+
+
+//   server.send(
+//     200,
+//     "text/plain",
+//     "OK"
+//   );
+// }
+
+
+// /***************************************************
+//               WEB AUTO MIST CONTROL
+// ***************************************************/
+
+// void handleAutoMist()
+// {
+//   autoMist =
+//       !autoMist;
+
+
+//   if (Firebase.ready())
+//   {
+//     if (Firebase.RTDB.setBool(
+//           &fbdo,
+//           "/control/autoMist",
+//           autoMist))
+//     {
+//       Serial.println(
+//         "Auto Mist Firebase OK"
+//       );
+//     }
+//     else
+//     {
+//       Serial.print(
+//         "Auto Mist Firebase ERROR: "
+//       );
+
+//       Serial.println(
+//         fbdo.errorReason()
+//       );
+//     }
+//   }
+
+
+//   server.send(
+//     200,
+//     "text/plain",
+//     "OK"
+//   );
+// }
+
+
+// /***************************************************
+//   RELAY STARTUP SAFETY
+// ***************************************************/
+
+// /*
+//   All five relays are initialized HIGH (OFF) before
+//   Wi-Fi/Firebase startup. This prevents accidental pump
+//   activation during boot.
+// */
+
+// /***************************************************
+//                        SETUP
+// ***************************************************/
+
+// void setup()
+// {
+//   Serial.begin(9600);
+
+//   delay(1000);
+
+
+//   Serial.println();
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.println(
+//     " SMART AEROPONICS i-BOT ESP32"
+//   );
+
+//   Serial.println(
+//     "================================="
+//   );
+
+
+//   /***********************************************
+//                   ADC CONFIGURATION
+//   ************************************************/
+
+//   analogReadResolution(12);
+
+//   analogSetAttenuation(
+//     ADC_11db
+//   );
+
+
+//   /***********************************************
+//                     RELAY SETUP
+//   ************************************************/
+
+//   for (int i = 0; i < 5; i++)
+//   {
+//     pinMode(
+//       relayPins[i],
+//       OUTPUT
+//     );
+
+//     digitalWrite(
+//       relayPins[i],
+//       HIGH
+//     );
+
+//     relayState[i] =
+//         false;
+//   }
+
+
+//   /***********************************************
+//                       I2C / OLED
+//   ************************************************/
+
+//   Wire.begin(
+//     21,
+//     22
+//   );
+
+
+//   if (!display.begin(
+//         SSD1306_SWITCHCAPVCC,
+//         0x3C
+//       ))
+//   {
+//     Serial.println(
+//       "OLED initialization failed!"
+//     );
+//   }
+//   else
+//   {
+//     display.clearDisplay();
+
+//     display.setTextColor(
+//       SSD1306_WHITE
+//     );
+
+//     display.setTextSize(1);
+
+//     display.setCursor(
+//       18,
+//       15
+//     );
+
+//     display.println(
+//       "SMART AEROPONICS"
+//     );
+
+//     display.setCursor(
+//       28,
+//       35
+//     );
+
+//     display.println(
+//       "Starting..."
+//     );
+
+//     display.display();
+
+//     delay(1500);
+//   }
+
+
+//   /***********************************************
+//                        DHT
+//   ************************************************/
+
+//   dht.begin();
+
+
+//   /***********************************************
+//                        WIFI
+//   ************************************************/
+
+//   connectWiFi();
+
+
+//   /***********************************************
+//                     FIREBASE
+//   ************************************************/
+
+//   config.api_key =
+//       API_KEY;
+
+//   config.database_url =
+//       DATABASE_URL;
+
+
+//   /*
+//      Firebase Email/Password
+//      Authentication
+//   */
+
+//   auth.user.email =
+//       USER_EMAIL;
+
+//   auth.user.password =
+//       USER_PASSWORD;
+
+
+//   /*
+//      Token status callback
+//   */
+
+//   config.token_status_callback =
+//       tokenStatusCallback;
+
+
+//   /*
+//      Server response timeout
+//   */
+
+//   config.timeout.serverResponse =
+//       10000;
+
+
+//   /*
+//      Start Firebase
+//   */
+
+//   Firebase.begin(
+//     &config,
+//     &auth
+//   );
+
+//   Firebase.reconnectWiFi(
+//     true
+//   );
+
+
+//   /***********************************************
+//                     FIREBASE STATUS
+//   ************************************************/
+
+//   Serial.println();
+//   Serial.println(
+//     "========== FIREBASE =========="
+//   );
+
+//   Serial.print(
+//     "Database URL: "
+//   );
+
+//   Serial.println(
+//     DATABASE_URL
+//   );
+
+//   Serial.print(
+//     "Firebase Ready: "
+//   );
+
+//   Serial.println(
+//     Firebase.ready()
+//   );
+
+//   Serial.println(
+//     "=============================="
+//   );
+
+
+//   /***********************************************
+//                        TIME
+//   ************************************************/
+
+//   configTime(
+//     0,
+//     0,
+//     "pool.ntp.org",
+//     "time.nist.gov"
+//   );
+
+
+//   /***********************************************
+//                    WEB SERVER
+//   ************************************************/
+
+//   server.on(
+//     "/",
+//     handleRoot
+//   );
+
+//   server.on(
+//     "/data",
+//     handleData
+//   );
+
+//   server.on(
+//     "/toggle",
+//     handleToggle
+//   );
+
+//   server.on(
+//     "/autoMist",
+//     handleAutoMist
+//   );
+
+
+//   server.begin();
+
+
+//   Serial.println();
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.println(
+//     "SYSTEM READY"
+//   );
+
+//   Serial.println(
+//     "================================="
+//   );
+
+//   Serial.print(
+//     "Dashboard: http://"
+//   );
+
+//   Serial.println(
+//     WiFi.localIP()
+//   );
+// }
+
+
+// /***************************************************
+//                       LOOP
+// ***************************************************/
+
+// void loop()
+// {
+//   /***********************************************
+//                   WEB SERVER
+//   ************************************************/
+
+//   server.handleClient();
+
+
+//   /***********************************************
+//                    WIFI CHECK
+//   ************************************************/
+
+//   if (WiFi.status() != WL_CONNECTED)
+//   {
+//     Serial.println(
+//       "WiFi disconnected."
+//     );
+
+//     WiFi.reconnect();
+//   }
+
+
+//   /***********************************************
+//                   SENSOR UPDATE
+//   ************************************************/
+
+//   if (
+//     millis() - lastSensor
+//     >= SENSOR_INTERVAL
+//   )
+//   {
+//     lastSensor =
+//         millis();
+
+//     readSensors();
+//   }
+
+
+//   /***********************************************
+//                  FIREBASE UPDATE
+//   ************************************************/
+
+//   if (
+//     Firebase.ready() &&
+//     millis() - lastFirebase
+//     >= FIREBASE_INTERVAL
+//   )
+//   {
+//     lastFirebase =
+//         millis();
+
+//     sendFirebase();
+
+//     readRelayFirebase();
+//   }
+
+
+//   /***********************************************
+//                     OLED UPDATE
+//   ************************************************/
+
+//   if (
+//     millis() - lastOLED
+//     >= OLED_INTERVAL
+//   )
+//   {
+//     lastOLED =
+//         millis();
+
+//     updateOLED();
+//   }
+// }
